@@ -45,7 +45,7 @@ func TestTimelineDirectionAwareMatching(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	Timeline(&buf, s)
+	Timeline(&buf, s, false)
 	out := buf.String()
 
 	// initialize must show the server info from the server's response, not the
@@ -72,7 +72,7 @@ func TestTimelineToolCallAndError(t *testing.T) {
 		},
 	}
 	var buf bytes.Buffer
-	Timeline(&buf, s)
+	Timeline(&buf, s, false)
 	out := buf.String()
 
 	if !strings.Contains(out, "tools/call read_file") || !strings.Contains(out, `"path":"/etc/hosts"`) {
@@ -88,6 +88,28 @@ func TestTimelineToolCallAndError(t *testing.T) {
 
 // TestTimelineOrphanResponse: a response whose request wasn't captured must
 // still be shown rather than silently dropped.
+// TestTimelineColor checks that ANSI codes are emitted only when color is on.
+func TestTimelineColor(t *testing.T) {
+	s := &store.Session{
+		Header: store.Header{ID: "test", Command: "srv"},
+		Events: []intent.Event{
+			ev(intent.ClientToServer, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"x"}}`),
+			ev(intent.ServerToClient, `{"jsonrpc":"2.0","id":1,"result":{}}`),
+		},
+	}
+
+	var plain, colored bytes.Buffer
+	Timeline(&plain, s, false)
+	Timeline(&colored, s, true)
+
+	if strings.Contains(plain.String(), "\x1b[") {
+		t.Errorf("plain output should contain no ANSI escapes:\n%q", plain.String())
+	}
+	if !strings.Contains(colored.String(), "\x1b[") {
+		t.Errorf("colored output should contain ANSI escapes:\n%q", colored.String())
+	}
+}
+
 func TestTimelineOrphanResponse(t *testing.T) {
 	s := &store.Session{
 		Header: store.Header{ID: "test", Command: "srv"},
@@ -96,7 +118,7 @@ func TestTimelineOrphanResponse(t *testing.T) {
 		},
 	}
 	var buf bytes.Buffer
-	Timeline(&buf, s)
+	Timeline(&buf, s, false)
 	out := buf.String()
 	if !strings.Contains(out, "(response id 99)") || !strings.Contains(out, "file:///x") {
 		t.Errorf("orphan response not surfaced:\n%s", out)

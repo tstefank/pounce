@@ -28,18 +28,59 @@ func Timeline(w io.Writer, s *store.Session) {
 	fmt.Fprintf(w, "started: %s\n", h.StartedAt.Format(time.RFC3339))
 	fmt.Fprintf(w, "events:  %d\n\n", len(s.Events))
 
-	// Index responses by id so each request can show its outcome. Responses
-	// flow server->client and carry the matching request id.
-	respByID := map[string]protocol.Message{}
+	// Match responses to requests direction-aware: a request is answered by a
+	// response traveling the *opposite* way, and JSON-RPC ids are only unique
+	// per sender — the client's `initialize` and the server's `roots/list` can
+	// both be id 0. So a server->client response answers a client->server
+	// request, and vice versa. Keying by id alone would collide.
+	respFromServer := map[string]protocol.Message{} // answers client->server requests
+	respFromClient := map[string]protocol.Message{} // answers server->client requests
+	reqFromClient := map[string]bool{}
+	reqFromServer := map[string]bool{}
 	for _, e := range s.Events {
 		if e.Msg == nil {
 			continue
 		}
-		if e.Msg.Kind() == protocol.KindResponse {
-			if k := e.Msg.IDKey(); k != "" {
-				respByID[k] = *e.Msg
+		k := e.Msg.IDKey()
+		if k == "" {
+			continue
+		}
+		switch e.Msg.Kind() {
+		case protocol.KindResponse:
+			if e.Dir == intent.ServerToClient {
+				respFromServer[k] = *e.Msg
+			} else {
+				respFromClient[k] = *e.Msg
+			}
+		case protocol.KindRequest:
+			if e.Dir == intent.ClientToServer {
+				reqFromClient[k] = true
+			} else {
+				reqFromServer[k] = true
 			}
 		}
+	}
+
+	// matchResponse returns the response to a request, looking in the opposite
+	// direction's response set.
+	matchResponse := func(req *protocol.Message, dir intent.Direction) (protocol.Message, bool) {
+		k := req.IDKey()
+		if dir == intent.ClientToServer {
+			r, ok := respFromServer[k]
+			return r, ok
+		}
+		r, ok := respFromClient[k]
+		return r, ok
+	}
+
+	// orphanResponse reports whether a response had no matching request in this
+	// log (so we print it standalone rather than hiding it).
+	orphanResponse := func(resp *intent.Event) bool {
+		k := resp.Msg.IDKey()
+		if resp.Dir == intent.ServerToClient {
+			return !reqFromClient[k] // answers a client->server request
+		}
+		return !reqFromServer[k]
 	}
 
 	var (
@@ -49,7 +90,8 @@ func Timeline(w io.Writer, s *store.Session) {
 		errors    int
 	)
 
-	for _, e := range s.Events {
+	for i := range s.Events {
+		e := s.Events[i]
 		ts := e.TS.Format("15:04:05.000")
 		arrow := dirArrow(e.Dir)
 
@@ -71,13 +113,13 @@ func Timeline(w io.Writer, s *store.Session) {
 					line += "  " + oneLine(string(tc.Arguments), argSummaryMax)
 				}
 			}
-			// Attach the matched response outcome, if any.
-			if resp, ok := respByID[m.IDKey()]; ok {
+			// Fold in the matched response: a method-aware summary of the result.
+			if resp, ok := matchResponse(m, e.Dir); ok {
 				if resp.Error != nil {
 					errors++
 					line += "  -> ERROR " + resp.Error.String()
 				} else {
-					line += "  -> ok"
+					line += "  -> " + summarizeResult(m.Method, resp)
 				}
 			} else {
 				line += "  -> (no response)"
@@ -89,17 +131,11 @@ func Timeline(w io.Writer, s *store.Session) {
 			fmt.Fprintf(w, "%s %s  %s (notification)\n", ts, arrow, m.Method)
 
 		case protocol.KindResponse:
-			// Responses are folded into their request line above; skip here so
-			// the timeline reads as request-centric. (tools/list is worth
-			// surfacing on its own, below.)
-			if tools, ok := m.AsToolList(); ok {
-				names := make([]string, 0, len(tools))
-				for _, t := range tools {
-					names = append(names, t.Name)
-				}
-				sort.Strings(names)
-				fmt.Fprintf(w, "%s %s  tools/list result: %d tools [%s]\n",
-					ts, arrow, len(tools), oneLine(strings.Join(names, ", "), argSummaryMax))
+			// Responses are normally folded into their request line above. Only
+			// print one standalone if its request wasn't captured in this log,
+			// so nothing is silently hidden.
+			if orphanResponse(&e) {
+				fmt.Fprintf(w, "%s %s  (response id %s) %s\n", ts, arrow, m.IDKey(), summarizeResult("", *m))
 			}
 
 		default:
@@ -109,6 +145,50 @@ func Timeline(w io.Writer, s *store.Session) {
 
 	fmt.Fprintf(w, "\nsummary: %d requests (%d tool calls, %d errors), %d notifications\n",
 		requests, toolCalls, errors, notifs)
+}
+
+// summarizeResult renders a one-line summary of a (non-error) response result,
+// specialized by the request method when known.
+func summarizeResult(method string, resp protocol.Message) string {
+	switch method {
+	case protocol.MethodToolsList:
+		if tools, ok := resp.AsToolList(); ok {
+			names := make([]string, 0, len(tools))
+			for _, t := range tools {
+				names = append(names, t.Name)
+			}
+			sort.Strings(names)
+			return fmt.Sprintf("%d tools [%s]", len(tools), oneLine(strings.Join(names, ", "), argSummaryMax))
+		}
+	case protocol.MethodRootsList:
+		if roots, ok := resp.AsRootList(); ok {
+			uris := make([]string, 0, len(roots))
+			for _, r := range roots {
+				uris = append(uris, r.URI)
+			}
+			return fmt.Sprintf("%d roots [%s]", len(roots), oneLine(strings.Join(uris, ", "), argSummaryMax))
+		}
+	case protocol.MethodInitialize:
+		if init, ok := resp.AsInitializeResult(); ok {
+			si := init.ServerInfo
+			if si.Name != "" {
+				return fmt.Sprintf("ok (%s %s, protocol %s)", si.Name, si.Version, init.ProtocolVersion)
+			}
+			return fmt.Sprintf("ok (protocol %s)", init.ProtocolVersion)
+		}
+	}
+	// Unknown method (e.g. an orphan response) — try the richest summary we can.
+	if roots, ok := resp.AsRootList(); ok {
+		uris := make([]string, 0, len(roots))
+		for _, r := range roots {
+			uris = append(uris, r.URI)
+		}
+		return fmt.Sprintf("%d roots [%s]", len(roots), oneLine(strings.Join(uris, ", "), argSummaryMax))
+	}
+	if tools, ok := resp.AsToolList(); ok {
+		return fmt.Sprintf("%d tools", len(tools))
+	}
+	return "ok"
 }
 
 func dirArrow(d intent.Direction) string {

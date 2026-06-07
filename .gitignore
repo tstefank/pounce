@@ -27,6 +27,12 @@ go.work.sum
 # env file
 .env
 
+# Local MCP client config used for testing pounce
+.mcp.json
+
+# Compiled pounce binary (build with `go build -o pounce ./cmd/pounce`)
+/pounce
+
 # Editor/IDE
 # .idea/
 # .vscode/

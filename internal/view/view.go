@@ -16,14 +16,45 @@ import (
 // argSummaryMax caps how much of a tool call's arguments is shown inline.
 const argSummaryMax = 80
 
-// Timeline writes a tool-call timeline for the session to w.
-func Timeline(w io.Writer, s *store.Session) {
+// styler wraps text in ANSI SGR codes when enabled, and is a no-op otherwise so
+// the same rendering code serves both colored terminals and plain pipes.
+type styler struct{ on bool }
+
+func (s styler) paint(code, text string) string {
+	if !s.on || text == "" {
+		return text
+	}
+	return "\x1b[" + code + "m" + text + "\x1b[0m"
+}
+
+func (s styler) dim(t string) string    { return s.paint("90", t) }   // gray
+func (s styler) method(t string) string { return s.paint("1;34", t) } // bold blue
+func (s styler) tool(t string) string   { return s.paint("1;33", t) } // bold yellow
+func (s styler) ok(t string) string     { return s.paint("32", t) }   // green
+func (s styler) errc(t string) string   { return s.paint("1;31", t) } // bold red
+
+func (s styler) arrow(d intent.Direction) string {
+	switch d {
+	case intent.ClientToServer:
+		return s.paint("36", "->") // cyan: toward server
+	case intent.ServerToClient:
+		return s.paint("35", "<-") // magenta: toward client
+	default:
+		return "--"
+	}
+}
+
+// Timeline writes a tool-call timeline for the session to w. When color is true
+// the output is decorated with ANSI escape codes.
+func Timeline(w io.Writer, s *store.Session, color bool) {
+	st := styler{on: color}
+
 	h := s.Header
 	cmd := h.Command
 	if len(h.Args) > 0 {
 		cmd += " " + strings.Join(h.Args, " ")
 	}
-	fmt.Fprintf(w, "session %s\n", h.ID)
+	fmt.Fprintf(w, "session %s\n", st.method(h.ID))
 	fmt.Fprintf(w, "command: %s\n", cmd)
 	fmt.Fprintf(w, "started: %s\n", h.StartedAt.Format(time.RFC3339))
 	fmt.Fprintf(w, "events:  %d\n\n", len(s.Events))
@@ -61,8 +92,6 @@ func Timeline(w io.Writer, s *store.Session) {
 		}
 	}
 
-	// matchResponse returns the response to a request, looking in the opposite
-	// direction's response set.
 	matchResponse := func(req *protocol.Message, dir intent.Direction) (protocol.Message, bool) {
 		k := req.IDKey()
 		if dir == intent.ClientToServer {
@@ -73,8 +102,6 @@ func Timeline(w io.Writer, s *store.Session) {
 		return r, ok
 	}
 
-	// orphanResponse reports whether a response had no matching request in this
-	// log (so we print it standalone rather than hiding it).
 	orphanResponse := func(resp *intent.Event) bool {
 		k := resp.Msg.IDKey()
 		if resp.Dir == intent.ServerToClient {
@@ -92,12 +119,11 @@ func Timeline(w io.Writer, s *store.Session) {
 
 	for i := range s.Events {
 		e := s.Events[i]
-		ts := e.TS.Format("15:04:05.000")
-		arrow := dirArrow(e.Dir)
+		ts := st.dim(e.TS.Format("15:04:05.000"))
+		arrow := st.arrow(e.Dir)
 
 		if e.Msg == nil {
-			// Unparseable frame — still surface it.
-			fmt.Fprintf(w, "%s %s  ?? unparsed: %s\n", ts, arrow, oneLine(e.RawText, argSummaryMax))
+			fmt.Fprintf(w, "%s %s  %s\n", ts, arrow, st.errc("?? unparsed: "+oneLine(e.RawText, argSummaryMax)))
 			continue
 		}
 		m := e.Msg
@@ -105,46 +131,55 @@ func Timeline(w io.Writer, s *store.Session) {
 		switch m.Kind() {
 		case protocol.KindRequest:
 			requests++
-			line := fmt.Sprintf("%s %s  %s", ts, arrow, m.Method)
+			line := fmt.Sprintf("%s %s  %s", ts, arrow, st.method(m.Method))
 			if tc, ok := m.AsToolCall(); ok {
 				toolCalls++
-				line = fmt.Sprintf("%s %s  %s %s", ts, arrow, m.Method, tc.Name)
+				line = fmt.Sprintf("%s %s  %s %s", ts, arrow, st.method(m.Method), st.tool(tc.Name))
 				if len(tc.Arguments) > 0 {
-					line += "  " + oneLine(string(tc.Arguments), argSummaryMax)
+					line += "  " + st.dim(oneLine(string(tc.Arguments), argSummaryMax))
 				}
 			}
-			// Fold in the matched response: a method-aware summary of the result.
 			if resp, ok := matchResponse(m, e.Dir); ok {
 				if resp.Error != nil {
 					errors++
-					line += "  -> ERROR " + resp.Error.String()
+					line += "  " + st.errc("-> ERROR "+resp.Error.String())
 				} else {
-					line += "  -> " + summarizeResult(m.Method, resp)
+					line += "  " + st.ok("-> "+summarizeResult(m.Method, resp))
 				}
 			} else {
-				line += "  -> (no response)"
+				line += "  " + st.dim("-> (no response)")
 			}
 			fmt.Fprintln(w, line)
 
 		case protocol.KindNotification:
 			notifs++
-			fmt.Fprintf(w, "%s %s  %s (notification)\n", ts, arrow, m.Method)
+			fmt.Fprintf(w, "%s %s  %s %s\n", ts, arrow, st.method(m.Method), st.dim("(notification)"))
 
 		case protocol.KindResponse:
 			// Responses are normally folded into their request line above. Only
 			// print one standalone if its request wasn't captured in this log,
 			// so nothing is silently hidden.
 			if orphanResponse(&e) {
-				fmt.Fprintf(w, "%s %s  (response id %s) %s\n", ts, arrow, m.IDKey(), summarizeResult("", *m))
+				fmt.Fprintf(w, "%s %s  %s %s\n", ts, arrow,
+					st.dim(fmt.Sprintf("(response id %s)", m.IDKey())), st.ok(summarizeResult("", *m)))
 			}
 
 		default:
-			fmt.Fprintf(w, "%s %s  (unknown message)\n", ts, arrow)
+			fmt.Fprintf(w, "%s %s  %s\n", ts, arrow, st.dim("(unknown message)"))
 		}
 	}
 
-	fmt.Fprintf(w, "\nsummary: %d requests (%d tool calls, %d errors), %d notifications\n",
-		requests, toolCalls, errors, notifs)
+	fmt.Fprintf(w, "\nsummary: %d requests (%d tool calls, %s), %d notifications\n",
+		requests, toolCalls, errorsLabel(st, errors), notifs)
+}
+
+// errorsLabel colors the error count red when nonzero.
+func errorsLabel(st styler, n int) string {
+	label := fmt.Sprintf("%d errors", n)
+	if n > 0 {
+		return st.errc(label)
+	}
+	return label
 }
 
 // summarizeResult renders a one-line summary of a (non-error) response result,
@@ -162,11 +197,7 @@ func summarizeResult(method string, resp protocol.Message) string {
 		}
 	case protocol.MethodRootsList:
 		if roots, ok := resp.AsRootList(); ok {
-			uris := make([]string, 0, len(roots))
-			for _, r := range roots {
-				uris = append(uris, r.URI)
-			}
-			return fmt.Sprintf("%d roots [%s]", len(roots), oneLine(strings.Join(uris, ", "), argSummaryMax))
+			return fmt.Sprintf("%d roots [%s]", len(roots), oneLine(joinRoots(roots), argSummaryMax))
 		}
 	case protocol.MethodInitialize:
 		if init, ok := resp.AsInitializeResult(); ok {
@@ -179,11 +210,7 @@ func summarizeResult(method string, resp protocol.Message) string {
 	}
 	// Unknown method (e.g. an orphan response) — try the richest summary we can.
 	if roots, ok := resp.AsRootList(); ok {
-		uris := make([]string, 0, len(roots))
-		for _, r := range roots {
-			uris = append(uris, r.URI)
-		}
-		return fmt.Sprintf("%d roots [%s]", len(roots), oneLine(strings.Join(uris, ", "), argSummaryMax))
+		return fmt.Sprintf("%d roots [%s]", len(roots), oneLine(joinRoots(roots), argSummaryMax))
 	}
 	if tools, ok := resp.AsToolList(); ok {
 		return fmt.Sprintf("%d tools", len(tools))
@@ -191,15 +218,12 @@ func summarizeResult(method string, resp protocol.Message) string {
 	return "ok"
 }
 
-func dirArrow(d intent.Direction) string {
-	switch d {
-	case intent.ClientToServer:
-		return "->"
-	case intent.ServerToClient:
-		return "<-"
-	default:
-		return "--"
+func joinRoots(roots []protocol.Root) string {
+	uris := make([]string, 0, len(roots))
+	for _, r := range roots {
+		uris = append(uris, r.URI)
 	}
+	return strings.Join(uris, ", ")
 }
 
 // oneLine collapses whitespace and truncates s to max runes with an ellipsis.

@@ -33,6 +33,9 @@ go.work.sum
 # Compiled pounce binary (build with `go build -o pounce ./cmd/pounce`)
 /pounce
 
+# Release build artifacts
+/dist/
+
 # Editor/IDE
 # .idea/
 # .vscode/

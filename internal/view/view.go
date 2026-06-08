@@ -8,9 +8,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/tstefank/pounce/internal/intent"
-	"github.com/tstefank/pounce/internal/protocol"
-	"github.com/tstefank/pounce/internal/store"
+	"pounce/internal/intent"
+	"pounce/internal/protocol"
+	"pounce/internal/store"
 )
 
 // argSummaryMax caps how much of a tool call's arguments is shown inline.

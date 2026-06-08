@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/tstefank/pounce/internal/intent"
+	"pounce/internal/intent"
 )
 
 func TestWriteReadRoundTrip(t *testing.T) {

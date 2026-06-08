@@ -12,7 +12,7 @@ import (
 	"encoding/json"
 	"time"
 
-	"github.com/tstefank/pounce/internal/protocol"
+	"pounce/internal/protocol"
 )
 
 // Direction records which way a message was traveling.

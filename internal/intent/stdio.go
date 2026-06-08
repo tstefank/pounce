@@ -14,7 +14,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/tstefank/pounce/internal/protocol"
+	"pounce/internal/protocol"
 )
 
 // maxFrameBytes caps how much we buffer for a single un-terminated frame before

@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/tstefank/pounce/internal/intent"
 	"github.com/tstefank/pounce/internal/protocol"
@@ -107,6 +108,32 @@ func TestTimelineColor(t *testing.T) {
 	}
 	if !strings.Contains(colored.String(), "\x1b[") {
 		t.Errorf("colored output should contain ANSI escapes:\n%q", colored.String())
+	}
+}
+
+// TestOneLineRuneSafe checks that truncation never splits a multi-byte rune,
+// so the output is always valid UTF-8.
+func TestOneLineRuneSafe(t *testing.T) {
+	// 10 two-byte runes (20 bytes). Truncating to 5 must keep 4 runes + ellipsis,
+	// not slice mid-byte.
+	in := strings.Repeat("é", 10)
+	out := oneLine(in, 5)
+
+	if !utf8.ValidString(out) {
+		t.Fatalf("output is not valid UTF-8: %q", out)
+	}
+	wantRunes := 5 // 4 kept + the ellipsis
+	if n := utf8.RuneCountInString(out); n != wantRunes {
+		t.Errorf("rune count = %d, want %d (%q)", n, wantRunes, out)
+	}
+	if !strings.HasSuffix(out, "…") {
+		t.Errorf("expected ellipsis suffix: %q", out)
+	}
+
+	// A short multi-byte string under the cap is returned unchanged.
+	short := "café"
+	if got := oneLine(short, 80); got != short {
+		t.Errorf("short string altered: %q", got)
 	}
 }
 

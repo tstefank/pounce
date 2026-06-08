@@ -227,10 +227,12 @@ func joinRoots(roots []protocol.Root) string {
 }
 
 // oneLine collapses whitespace and truncates s to max runes with an ellipsis.
+// Truncation is rune-aware so multi-byte UTF-8 is never split mid-character.
 func oneLine(s string, max int) string {
 	s = strings.Join(strings.Fields(s), " ")
-	if len(s) <= max {
+	r := []rune(s)
+	if len(r) <= max {
 		return s
 	}
-	return s[:max-1] + "…"
+	return string(r[:max-1]) + "…"
 }

@@ -2,7 +2,9 @@ package intent
 
 import (
 	"bytes"
+	"cmp"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -66,9 +68,9 @@ func (s *StdioSource) Run(ctx context.Context, out chan<- Event) error {
 	if len(s.Command) == 0 {
 		return errors.New("stdio: empty command")
 	}
-	in := orDefault[io.Reader](s.In, os.Stdin)
-	stdout := orDefault[io.Writer](s.Out, os.Stdout)
-	stderr := orDefault[io.Writer](s.Err, os.Stderr)
+	in := cmp.Or[io.Reader](s.In, os.Stdin)
+	stdout := cmp.Or[io.Writer](s.Out, os.Stdout)
+	stderr := cmp.Or[io.Writer](s.Err, os.Stderr)
 	now := s.Now
 	if now == nil {
 		now = time.Now
@@ -213,15 +215,32 @@ func (l *lineSplitter) emitFrame() {
 	}
 	for i := range msgs {
 		m := msgs[i]
-		raw := append([]byte(nil), frame...) // detach from buffer
 		l.src.emit(l.out, Event{
 			TS:     l.now(),
 			Source: "stdio",
 			Dir:    l.dir,
-			Raw:    raw,
+			Raw:    rawFor(frame, msgs, i),
 			Msg:    &m,
 		})
 	}
+}
+
+// rawFor returns the JSON to store as an event's Raw. For the common
+// single-message frame it is the exact frame bytes (detached from the buffer).
+// For a legacy batch array it is that one message re-encoded on its own, so the
+// stored copy round-trips to the right message — store.Read reconstructs each
+// event's Msg from its Raw, and the whole-array frame would otherwise collapse
+// every batch element back to the first. Re-encoding our own copy is fine; only
+// the *forwarded* stream must never be re-serialized.
+func rawFor(frame []byte, msgs []protocol.Message, i int) []byte {
+	if len(msgs) == 1 {
+		return append([]byte(nil), frame...)
+	}
+	if b, err := json.Marshal(msgs[i]); err == nil {
+		return b
+	}
+	// Fall back to the whole frame if re-encoding somehow fails; never drop it.
+	return append([]byte(nil), frame...)
 }
 
 // flush emits any trailing bytes that arrived without a terminating newline
@@ -230,14 +249,4 @@ func (l *lineSplitter) flush() {
 	if l.over || l.buf.Len() > 0 {
 		l.emitFrame()
 	}
-}
-
-// orDefault returns v if non-nil, else def.
-func orDefault[T any](v T, def T) T {
-	// Compare via interface to catch typed-nil interfaces.
-	var zero T
-	if any(v) == any(zero) {
-		return def
-	}
-	return v
 }

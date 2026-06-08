@@ -9,6 +9,7 @@ package store
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -143,7 +144,7 @@ func Read(path string) (*Session, error) {
 	var s Session
 	for sc.Scan() {
 		line := sc.Bytes()
-		if len(strings.TrimSpace(string(line))) == 0 {
+		if len(bytes.TrimSpace(line)) == 0 {
 			continue
 		}
 		// Peek at the kind tag.

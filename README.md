@@ -7,7 +7,7 @@ surfaces every JSON-RPC message that flows through it. It's **observe-only**: it
 watches and records, and never blocks, modifies, or injects into the stream —
 the wrapped server behaves exactly as if pounce weren't there.
 
-> **v0.1.0 (Phase 1):** the stdio shim + protocol tee. No privileges required.
+> **v0.1.1 (Phase 1):** the stdio shim + protocol tee. No privileges required.
 > OS-level capture (files/network/processes) and intent↔effect correlation are
 > on the roadmap — see [Roadmap](#roadmap).
 

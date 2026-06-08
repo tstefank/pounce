@@ -21,6 +21,12 @@ Implement the stdio tee behind a small **intent-source interface** feeding a **s
 - **Granularity:** subprocess skills → clean per-process attribution; in-process skills → only runtime-PID-level, so you need the log to label them.
 - **Correlation degrades gracefully:** protocol path → per-tool-call attribution; process-tree-only → per-process/time-window. Still catches the exfil, just coarser.
 
+### Reactions / actions (future event sink — do NOT build yet)
+The event pipeline feeds **sinks**: the session-log writer (Phase 1), the correlator/discrepancy flagger (Phase 3), and later a **rules/actions sink** that matches events (e.g. a detected discrepancy) and runs a configured response.
+- **Default = notify / record / route** — alert Slack/PagerDuty, hit a webhook, log, snapshot, SIEM export, run a user script. Stays observe-first: it responds to what happened without changing agent behavior.
+- **Enforce / intervene** (block a call, kill a process, cut network) is a deliberate, opt-in, *later* capability kept off the core path — it crosses into control (Nightglass's lane). If ever built, frame it as *enforcement informed by ground truth*, and note that blocking only works in the **synchronous protocol intercept**; the OS layer is observational (you can't un-read a file), so OS-side "enforcement" is kill-after-detection, not prevention.
+- Needs Phase-3 detection to fire on, so nothing to build now — just keep the sink/subscriber seam clean. Shape later: declarative rules (condition → action) + a generic webhook/script escape hatch.
+
 ## Tech stack & conventions
 - **Go**, compiled to a **single static binary** (this is the distribution wedge — keep it dependency-light; avoid CGO unless unavoidable).
 - CLI via `cobra` (or stdlib `flag` if simpler). Subcommands: `wrap`, `view`.

@@ -111,6 +111,32 @@ func TestTimelineColor(t *testing.T) {
 	}
 }
 
+// TestTimelineToolExecutionError checks that a tools/call which returns a
+// successful JSON-RPC response carrying result.isError:true is shown as an
+// error, not as "-> ok".
+func TestTimelineToolExecutionError(t *testing.T) {
+	s := &store.Session{
+		Header: store.Header{ID: "test", Command: "srv"},
+		Events: []intent.Event{
+			ev(intent.ClientToServer, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"does-not-exist"}}`),
+			ev(intent.ServerToClient, `{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"Tool does-not-exist not found"}],"isError":true}}`),
+		},
+	}
+	var buf bytes.Buffer
+	Timeline(&buf, s, false)
+	out := buf.String()
+
+	if !strings.Contains(out, "-> tool error: Tool does-not-exist not found") {
+		t.Errorf("tool execution error not surfaced:\n%s", out)
+	}
+	if strings.Contains(out, "-> ok") {
+		t.Errorf("failed tool call wrongly shown as ok:\n%s", out)
+	}
+	if !strings.Contains(out, "1 errors") {
+		t.Errorf("tool execution error not counted in summary:\n%s", out)
+	}
+}
+
 // TestOneLineRuneSafe checks that truncation never splits a multi-byte rune,
 // so the output is always valid UTF-8.
 func TestOneLineRuneSafe(t *testing.T) {

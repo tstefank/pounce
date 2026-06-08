@@ -140,9 +140,14 @@ func Timeline(w io.Writer, s *store.Session, color bool) {
 				}
 			}
 			if resp, ok := matchResponse(m, e.Dir); ok {
-				if resp.Error != nil {
+				if toolErr, isToolErr := resp.ToolError(); resp.Error != nil {
 					errors++
 					line += "  " + st.errc("-> ERROR "+resp.Error.String())
+				} else if m.Method == protocol.MethodToolsCall && isToolErr {
+					// A successful JSON-RPC response that nonetheless reports the
+					// tool failed (result.isError == true).
+					errors++
+					line += "  " + st.errc("-> tool error: "+oneLine(toolErr, argSummaryMax))
 				} else {
 					line += "  " + st.ok("-> "+summarizeResult(m.Method, resp))
 				}

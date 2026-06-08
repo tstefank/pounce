@@ -28,6 +28,34 @@ func (m Message) AsToolCall() (tc ToolCall, ok bool) {
 	return tc, true
 }
 
+// ToolError reports whether a tools/call response carried an execution error.
+// MCP conveys tool failures two ways: a JSON-RPC error object (a protocol-level
+// failure, see Message.Error) or a *successful* response whose result has
+// "isError": true (the tool ran but reported failure). This covers the latter,
+// returning the first text content as the message. ok is false when the result
+// isn't a failed tool call.
+func (m Message) ToolError() (msg string, ok bool) {
+	if m.Result == nil {
+		return "", false
+	}
+	var r struct {
+		IsError bool `json:"isError"`
+		Content []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		} `json:"content"`
+	}
+	if json.Unmarshal(m.Result, &r) != nil || !r.IsError {
+		return "", false
+	}
+	for _, c := range r.Content {
+		if c.Type == "text" && c.Text != "" {
+			return c.Text, true
+		}
+	}
+	return "", true
+}
+
 // Tool is one entry of a tools/list result.
 type Tool struct {
 	Name        string `json:"name"`

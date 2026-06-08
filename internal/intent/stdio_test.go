@@ -7,6 +7,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/tstefank/pounce/internal/protocol"
 )
 
 // fixedClock returns a constant time so events are deterministic.
@@ -129,6 +131,73 @@ func TestStdioRecordsUnparseableFrame(t *testing.T) {
 	}
 	if !sawErr {
 		t.Error("expected an event recording the unparseable frame")
+	}
+}
+
+// TestStdioBatchFramePerMessageRaw verifies that a legacy JSON-RPC batch array
+// is split into one Event per message, each carrying its OWN message JSON in
+// Raw — not the whole array. Otherwise store.Read (which reconstructs Msg from
+// Raw) would collapse every batch element back to the first.
+func TestStdioBatchFramePerMessageRaw(t *testing.T) {
+	// A batch with a request and a notification (distinct id/kind).
+	input := `[{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"a"}},{"jsonrpc":"2.0","method":"notifications/x"}]` + "\n"
+
+	src := &StdioSource{
+		Command: []string{"cat"},
+		In:      strings.NewReader(input),
+		Out:     &bytes.Buffer{},
+		Err:     &bytes.Buffer{},
+		Now:     fixedClock,
+	}
+	events := make(chan Event, 16)
+	var got []Event
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go collect(events, &got, &wg)
+	if err := src.Run(context.Background(), events); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	close(events)
+	wg.Wait()
+
+	// Look at one direction's two events (cat echoes, so pick client->server).
+	var c2s []Event
+	for _, e := range got {
+		if e.Dir == ClientToServer {
+			c2s = append(c2s, e)
+		}
+	}
+	if len(c2s) != 2 {
+		t.Fatalf("batch should split into 2 events, got %d", len(c2s))
+	}
+
+	// Each event's Raw must reparse to exactly one message of the right kind —
+	// simulating what store.Read does on read-back.
+	reparse := func(e Event) protocol.Message {
+		msgs, err := protocol.ParseLine(e.Raw)
+		if err != nil || len(msgs) != 1 {
+			t.Fatalf("Raw should hold exactly one message, got %d (err=%v): %s", len(msgs), err, e.Raw)
+		}
+		return msgs[0]
+	}
+	m0, m1 := reparse(c2s[0]), reparse(c2s[1])
+	if m0.Kind() != protocol.KindRequest || m0.Method != "tools/call" || m0.IDKey() != "1" {
+		t.Errorf("first batch element wrong: kind=%s method=%s id=%s", m0.Kind(), m0.Method, m0.IDKey())
+	}
+	if m1.Kind() != protocol.KindNotification || m1.Method != "notifications/x" {
+		t.Errorf("second batch element wrong: kind=%s method=%s", m1.Kind(), m1.Method)
+	}
+}
+
+// TestRawForSingleFrameIsExact: a single-message frame stores the exact bytes.
+func TestRawForSingleFrameIsExact(t *testing.T) {
+	frame := []byte(`{"jsonrpc":"2.0","id":5,"method":"x"}`)
+	msgs, err := protocol.ParseLine(frame)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := rawFor(frame, msgs, 0); string(got) != string(frame) {
+		t.Errorf("single frame Raw = %s, want exact %s", got, frame)
 	}
 }
 

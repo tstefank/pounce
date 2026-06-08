@@ -18,8 +18,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/tstefank/pounce/internal/intent"
-	"github.com/tstefank/pounce/internal/protocol"
+	"pounce/internal/intent"
+	"pounce/internal/protocol"
 )
 
 // recordKind tags each JSONL line.

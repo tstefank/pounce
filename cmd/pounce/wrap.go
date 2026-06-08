@@ -12,8 +12,8 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/tstefank/pounce/internal/intent"
-	"github.com/tstefank/pounce/internal/store"
+	"pounce/internal/intent"
+	"pounce/internal/store"
 )
 
 // eventBuffer is how many observed messages can queue for the disk writer

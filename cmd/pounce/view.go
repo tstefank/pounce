@@ -6,8 +6,8 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/tstefank/pounce/internal/store"
-	"github.com/tstefank/pounce/internal/view"
+	"pounce/internal/store"
+	"pounce/internal/view"
 )
 
 func newViewCmd() *cobra.Command {

@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/tstefank/pounce/internal/protocol"
+	"pounce/internal/protocol"
 )
 
 // fixedClock returns a constant time so events are deterministic.

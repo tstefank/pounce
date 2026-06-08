@@ -1,4 +1,4 @@
-module github.com/tstefank/pounce
+module pounce
 
 go 1.26.4
 

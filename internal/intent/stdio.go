@@ -10,7 +10,6 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -104,30 +103,33 @@ func (s *StdioSource) Run(ctx context.Context, out chan<- Event) error {
 		s.OnStart(cmd.Process.Pid)
 	}
 
-	var wg sync.WaitGroup
-	wg.Add(2)
-
-	// client -> server: copy in -> serverIn, teeing a copy to the splitter.
-	// io.TeeReader writes to the splitter before the byte reaches serverIn, so
-	// the splitter must never block; lineSplitter guarantees that.
-	go func() {
-		defer wg.Done()
-		sp := newLineSplitter(s, ClientToServer, now, out)
-		_, _ = io.Copy(serverIn, io.TeeReader(in, sp))
-		sp.flush()
-		// Client closed its stdin: propagate EOF to the server.
-		_ = serverIn.Close()
-	}()
-
 	// server -> client: copy serverOut -> stdout, teeing a copy to the splitter.
+	// This completes when the child closes its stdout — i.e. when it exits — and
+	// is our signal that the session is done.
+	stdoutDone := make(chan struct{})
 	go func() {
-		defer wg.Done()
+		defer close(stdoutDone)
 		sp := newLineSplitter(s, ServerToClient, now, out)
 		_, _ = io.Copy(stdout, io.TeeReader(serverOut, sp))
 		sp.flush()
 	}()
 
-	wg.Wait()
+	// client -> server: copy in -> serverIn, teeing a copy to the splitter.
+	// io.TeeReader writes to the splitter before the byte reaches serverIn, so
+	// the splitter must never block; lineSplitter guarantees that.
+	//
+	// This pump is fire-and-forget: when our stdin is an interactive terminal it
+	// never reaches EOF, so this io.Copy can block on the read indefinitely. If
+	// the child exits on its own (rather than the client closing stdin), waiting
+	// for this goroutine would hang wrap forever — so we deliberately do not.
+	go func() {
+		sp := newLineSplitter(s, ClientToServer, now, out)
+		_, _ = io.Copy(serverIn, io.TeeReader(in, sp))
+		sp.flush()
+		_ = serverIn.Close() // client closed stdin: propagate EOF to the server
+	}()
+
+	<-stdoutDone
 	return cmd.Wait()
 }
 

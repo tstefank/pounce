@@ -3,6 +3,7 @@ package intent
 import (
 	"bytes"
 	"context"
+	"io"
 	"strings"
 	"sync"
 	"testing"
@@ -198,6 +199,33 @@ func TestRawForSingleFrameIsExact(t *testing.T) {
 	}
 	if got := rawFor(frame, msgs, 0); string(got) != string(frame) {
 		t.Errorf("single frame Raw = %s, want exact %s", got, frame)
+	}
+}
+
+// TestStdioReturnsWhenChildExitsDespiteOpenStdin guards against the hang where
+// wrap waited on the stdin pump: when stdin never reaches EOF (an interactive
+// terminal) but the child exits on its own, Run must still return promptly —
+// triggered by the child closing stdout, not by the stdin copy finishing.
+func TestStdioReturnsWhenChildExitsDespiteOpenStdin(t *testing.T) {
+	pr, pw := io.Pipe() // pr never receives data or EOF
+	defer pw.Close()
+
+	src := &StdioSource{
+		Command: []string{"true"}, // exits immediately, reads no stdin
+		In:      pr,
+		Out:     &bytes.Buffer{},
+		Err:     &bytes.Buffer{},
+		Now:     fixedClock,
+	}
+	events := make(chan Event, 4)
+	done := make(chan error, 1)
+	go func() { done <- src.Run(context.Background(), events) }()
+
+	select {
+	case <-done:
+		// returned promptly — good
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run hung waiting on the stdin pump after the child exited")
 	}
 }
 

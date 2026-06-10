@@ -43,6 +43,43 @@ func TestMonitorRoutesBySubtree(t *testing.T) {
 	}
 }
 
+// TestMonitorAncestryAttribution exercises the on-demand path: a PID that isn't
+// yet in the subtree but whose ancestry (in the latest snapshot) reaches the
+// session root must still be attributed and memoized.
+func TestMonitorAncestryAttribution(t *testing.T) {
+	m := NewMonitor()
+	out := make(chan Event, 4)
+
+	// Session rooted at 100; its tree currently holds only the root (no refresh
+	// has expanded it). The snapshot knows 300 -> 200 -> 100.
+	s := &monSession{id: "s", tree: NewSubtree(100), out: out}
+	m.sessions["s"] = s
+	m.lastParent = map[int]int{200: 100, 300: 200}
+
+	m.route(Event{PID: 300, Op: OpConnect, Proc: "curl"})
+
+	select {
+	case e := <-out:
+		if e.PID != 300 {
+			t.Fatalf("attributed wrong pid %d", e.PID)
+		}
+	default:
+		t.Fatal("event from descendant 300 was not attributed via ancestry")
+	}
+	if !s.tree.Contains(300) {
+		t.Error("descendant 300 should be memoized into the subtree")
+	}
+
+	// An unrelated PID whose ancestry never reaches the root is not attributed.
+	m.lastParent[900] = 1
+	m.route(Event{PID: 900, Op: OpConnect})
+	select {
+	case e := <-out:
+		t.Fatalf("unrelated pid %d should not be attributed", e.PID)
+	default:
+	}
+}
+
 func TestMonitorMultipleSessions(t *testing.T) {
 	m := NewMonitor()
 	m.snapshot = func(context.Context) (map[int]int, error) {

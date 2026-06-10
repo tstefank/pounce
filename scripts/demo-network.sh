@@ -22,8 +22,8 @@ echo "Starting capture daemon (network tier)..."
 sudo ./pounce daemon --print 2>/tmp/pounced.log &
 sleep 1.5
 
-echo "Wrapping a subtree that curls example.com..."
-./pounce wrap -- bash -c 'sleep 1; curl -s https://example.com -o /dev/null; sleep 1' \
+echo "Wrapping a subtree that curls example.com a few times..."
+./pounce wrap -- bash -c 'for i in $(seq 1 10); do curl -s https://example.com -o /dev/null; done' \
     1>/dev/null 2>/tmp/pwrap.log
 
 sleep 1

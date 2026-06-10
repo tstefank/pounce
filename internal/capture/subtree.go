@@ -39,6 +39,14 @@ func (s *Subtree) Contains(pid int) bool {
 	return s.members[pid]
 }
 
+// Add records pid as a member (used for on-demand ancestry attribution between
+// polls). Membership is monotonic, so it persists once added.
+func (s *Subtree) Add(pid int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.members[pid] = true
+}
+
 // Refresh recomputes membership from a parent map (pid -> ppid). Membership is
 // monotonic within a session: once a PID has been seen as a member it stays a
 // member, so a network event that arrives just after the process exits (and

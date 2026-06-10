@@ -8,8 +8,11 @@ import (
 
 // defaultPollInterval is how often the Monitor re-samples the process table to
 // keep subtree membership current. Network events carry their own PID, so this
-// only governs how quickly a newly-spawned descendant is recognized.
-const defaultPollInterval = 500 * time.Millisecond
+// governs how quickly a newly-spawned descendant is recognized — and, because
+// short-lived processes (a quick curl) can live and die between samples, how
+// reliably we attribute them at all. Kept short for the network tier; precise
+// lineage will come from the eslogger fork stream (files tier).
+const defaultPollInterval = 100 * time.Millisecond
 
 // Monitor consumes system-wide events from one or more Sources and attributes
 // each to the registered session(s) whose PID subtree contains the event's
@@ -18,6 +21,10 @@ const defaultPollInterval = 500 * time.Millisecond
 type Monitor struct {
 	mu       sync.Mutex
 	sessions map[string]*monSession
+
+	// lastParent is the most recent pid->ppid snapshot, used for on-demand
+	// ancestry attribution between polls. Guarded by mu.
+	lastParent map[int]int
 
 	// snapshot returns a pid->ppid map; overridable in tests. Defaults to
 	// ProcessSnapshot.
@@ -35,6 +42,7 @@ type monSession struct {
 func NewMonitor() *Monitor {
 	return &Monitor{
 		sessions:     map[string]*monSession{},
+		lastParent:   map[int]int{},
 		snapshot:     ProcessSnapshot,
 		pollInterval: defaultPollInterval,
 	}
@@ -45,11 +53,15 @@ func NewMonitor() *Monitor {
 // process snapshot so events aren't missed before the first poll tick.
 func (m *Monitor) AddSession(ctx context.Context, id string, rootPID int, out chan<- Event) {
 	s := &monSession{id: id, tree: NewSubtree(rootPID), out: out}
-	if parent, err := m.snapshot(ctx); err == nil {
+	parent, err := m.snapshot(ctx)
+	if err == nil {
 		s.tree.Refresh(parent)
 	}
 	m.mu.Lock()
 	m.sessions[id] = s
+	if err == nil {
+		m.lastParent = parent
+	}
 	m.mu.Unlock()
 }
 
@@ -90,23 +102,53 @@ func (m *Monitor) refreshAll(ctx context.Context) {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.lastParent = parent
 	for _, s := range m.sessions {
 		s.tree.Refresh(parent)
 	}
 }
 
-// route delivers e to every session whose subtree contains e.PID. Delivery is
+// route delivers e to the session whose subtree contains e.PID. Delivery is
 // non-blocking: if a session's channel is full the event is dropped rather than
 // stalling capture (the same observe-only discipline as the protocol tee).
 func (m *Monitor) route(e Event) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	for _, s := range m.sessions {
-		if s.tree.Contains(e.PID) {
-			select {
-			case s.out <- e:
-			default:
-			}
+	if s := m.sessionForPIDLocked(e.PID); s != nil {
+		select {
+		case s.out <- e:
+		default:
 		}
 	}
+}
+
+// sessionForPIDLocked finds the session that owns pid. It first checks current
+// subtree membership, then — to catch a short-lived process that spawned and
+// connected between polls — walks pid's ancestry in the latest process snapshot
+// looking for a session root. A match is memoized into that session's subtree.
+// Caller must hold m.mu.
+func (m *Monitor) sessionForPIDLocked(pid int) *monSession {
+	for _, s := range m.sessions {
+		if s.tree.Contains(pid) {
+			return s
+		}
+	}
+	cur := pid
+	for i := 0; i < 64; i++ {
+		ppid, ok := m.lastParent[cur]
+		if !ok {
+			break // cur not in the snapshot (already exited, or unknown)
+		}
+		for _, s := range m.sessions {
+			if s.tree.Contains(ppid) {
+				s.tree.Add(pid)
+				return s
+			}
+		}
+		if ppid <= 1 || ppid == cur {
+			break
+		}
+		cur = ppid
+	}
+	return nil
 }

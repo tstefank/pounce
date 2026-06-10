@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"pounce/internal/capture"
 	"pounce/internal/intent"
 	"pounce/internal/protocol"
 	"pounce/internal/store"
@@ -32,6 +33,7 @@ func (s styler) method(t string) string { return s.paint("1;34", t) } // bold bl
 func (s styler) tool(t string) string   { return s.paint("1;33", t) } // bold yellow
 func (s styler) ok(t string) string     { return s.paint("32", t) }   // green
 func (s styler) errc(t string) string   { return s.paint("1;31", t) } // bold red
+func (s styler) remote(t string) string { return s.paint("1;36", t) } // bold cyan: network destination
 
 func (s styler) arrow(d intent.Direction) string {
 	switch d {
@@ -115,16 +117,16 @@ func Timeline(w io.Writer, s *store.Session, color bool) {
 		notifs    int
 		toolCalls int
 		errors    int
+		osEvents  int
 	)
 
-	for i := range s.Events {
-		e := s.Events[i]
+	renderProto := func(e intent.Event) {
 		ts := st.dim(e.TS.Format("15:04:05.000"))
 		arrow := st.arrow(e.Dir)
 
 		if e.Msg == nil {
 			fmt.Fprintf(w, "%s %s  %s\n", ts, arrow, st.errc("?? unparsed: "+oneLine(e.RawText, argSummaryMax)))
-			continue
+			return
 		}
 		m := e.Msg
 
@@ -174,8 +176,33 @@ func Timeline(w io.Writer, s *store.Session, color bool) {
 		}
 	}
 
-	fmt.Fprintf(w, "\nsummary: %d requests (%d tool calls, %s), %d notifications\n",
+	renderOS := func(e capture.Event) {
+		osEvents++
+		fmt.Fprintln(w, renderOSEvent(st, e))
+	}
+
+	// Merge protocol and OS events into one time-ordered timeline. Each slice is
+	// already in chronological order, so a linear merge suffices.
+	i, j := 0, 0
+	for i < len(s.Events) || j < len(s.OSEvents) {
+		if i >= len(s.Events) {
+			renderOS(s.OSEvents[j])
+			j++
+		} else if j >= len(s.OSEvents) || !s.OSEvents[j].TS.Before(s.Events[i].TS) {
+			renderProto(s.Events[i])
+			i++
+		} else {
+			renderOS(s.OSEvents[j])
+			j++
+		}
+	}
+
+	summary := fmt.Sprintf("\nsummary: %d requests (%d tool calls, %s), %d notifications",
 		requests, toolCalls, errorsLabel(st, errors), notifs)
+	if len(s.OSEvents) > 0 {
+		summary += fmt.Sprintf(", %d OS events", osEvents)
+	}
+	fmt.Fprintln(w, summary)
 }
 
 // errorsLabel colors the error count red when nonzero.
@@ -221,6 +248,24 @@ func summarizeResult(method string, resp protocol.Message) string {
 		return fmt.Sprintf("%d tools", len(tools))
 	}
 	return "ok"
+}
+
+// renderOSEvent formats one OS ground-truth event for the timeline. A "· net"
+// marker and a distinct color set OS rows apart from the protocol arrows.
+func renderOSEvent(st styler, e capture.Event) string {
+	ts := st.dim(e.TS.Format("15:04:05.000"))
+	who := st.dim(fmt.Sprintf("%s pid %d", e.Proc, e.PID))
+	switch e.Op {
+	case capture.OpConnect:
+		proto, remote, dir := "", "", ""
+		if e.Net != nil {
+			proto, remote, dir = e.Net.Proto, e.Net.Remote, e.Net.Dir
+		}
+		return fmt.Sprintf("%s %s  %s %s  %s  %s",
+			ts, st.dim("· net"), proto, st.remote(remote), st.dim(dir), who)
+	default:
+		return fmt.Sprintf("%s %s  %s", ts, st.dim("· os"), who)
+	}
 }
 
 func joinRoots(roots []protocol.Root) string {

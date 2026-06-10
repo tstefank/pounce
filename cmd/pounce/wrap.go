@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"os/signal"
 	"sync"
@@ -13,6 +15,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"pounce/internal/intent"
+	"pounce/internal/ipc"
 	"pounce/internal/store"
 )
 
@@ -44,9 +47,10 @@ Example:
 
 func runWrap(args []string) error {
 	start := time.Now()
+	sessionID := store.NewID(start)
 
 	w, err := store.Create(store.Header{
-		ID:        store.NewID(start),
+		ID:        sessionID,
 		PounceVer: version,
 		StartedAt: start,
 		Command:   args[0],
@@ -63,6 +67,14 @@ func runWrap(args []string) error {
 	defer stop()
 
 	src := &intent.StdioSource{Command: args}
+
+	// When the child starts, best-effort register its PID subtree with the
+	// capture daemon (if one is running) and stream OS events back into the log.
+	// No daemon → this is a no-op and wrap behaves exactly as in Phase 1.
+	var daemonConn *net.UnixConn
+	src.OnStart = func(pid int) {
+		daemonConn = connectDaemon(sessionID, pid, w)
+	}
 
 	// Drain observed events to disk on a separate goroutine so disk latency
 	// never reaches the forwarding path.
@@ -85,6 +97,12 @@ func runWrap(args []string) error {
 	close(events)
 	consumer.Wait()
 
+	// Stop the OS-event stream before closing the log: closing the connection
+	// unblocks the reader goroutine that writes OS events into the store.
+	if daemonConn != nil {
+		daemonConn.Close()
+	}
+
 	if err := w.Close(); err != nil {
 		fmt.Fprintf(os.Stderr, "pounce: closing session log: %v\n", err)
 	}
@@ -93,4 +111,41 @@ func runWrap(args []string) error {
 	}
 
 	return runErr
+}
+
+// connectDaemon makes a best-effort connection to the capture daemon, registers
+// this session's root PID, and streams the OS events it sends back into the
+// session log. It returns nil (and is silent) when no daemon is reachable, so a
+// client-launched shim with no daemon behaves exactly as in Phase 1.
+//
+// The socket path can be overridden with POUNCE_SOCK (for testing).
+func connectDaemon(sessionID string, pid int, w *store.Writer) *net.UnixConn {
+	sock := os.Getenv("POUNCE_SOCK")
+	if sock == "" {
+		sock = ipc.DefaultSocket
+	}
+	conn, err := ipc.Dial(sock)
+	if err != nil {
+		return nil // no daemon — OS capture simply isn't available
+	}
+	enc := json.NewEncoder(conn)
+	if err := enc.Encode(ipc.Message{Type: ipc.MsgRegister, SessionID: sessionID, RootPID: pid}); err != nil {
+		conn.Close()
+		return nil
+	}
+	fmt.Fprintf(os.Stderr, "pounce: capture daemon attached — recording OS activity for the server subtree\n")
+
+	go func() {
+		dec := json.NewDecoder(conn)
+		for {
+			var m ipc.Message
+			if err := dec.Decode(&m); err != nil {
+				return // connection closed
+			}
+			if m.Type == ipc.MsgOSEvent && m.Event != nil {
+				_ = w.WriteOSEvent(*m.Event)
+			}
+		}
+	}()
+	return conn
 }

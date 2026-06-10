@@ -46,6 +46,11 @@ type StdioSource struct {
 	// Now defaults to time.Now.
 	Now Clock
 
+	// OnStart, if set, is called once with the child's PID immediately after the
+	// process starts. The wrap command uses it to register the PID subtree with
+	// the capture daemon while the server runs.
+	OnStart func(pid int)
+
 	cmd     *exec.Cmd
 	dropped atomic.Int64
 }
@@ -95,6 +100,9 @@ func (s *StdioSource) Run(ctx context.Context, out chan<- Event) error {
 		return fmt.Errorf("stdio: start %q: %w", s.Command[0], err)
 	}
 	s.cmd = cmd
+	if s.OnStart != nil {
+		s.OnStart(cmd.Process.Pid)
+	}
 
 	var wg sync.WaitGroup
 	wg.Add(2)

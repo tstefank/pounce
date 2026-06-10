@@ -16,8 +16,10 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
+	"pounce/internal/capture"
 	"pounce/internal/intent"
 	"pounce/internal/protocol"
 )
@@ -28,6 +30,7 @@ type recordKind string
 const (
 	kindHeader recordKind = "header"
 	kindEvent  recordKind = "event"
+	kindOS     recordKind = "os" // OS ground-truth event (Phase 2)
 )
 
 // Header is the first line of a session log: metadata about the wrap run.
@@ -40,11 +43,17 @@ type Header struct {
 	Args      []string   `json:"args"`
 }
 
-// envelope is the on-disk shape of an event line. The intent.Event is embedded
-// flat; "kind" distinguishes it from a header.
+// envelope is the on-disk shape of a protocol-event line. The intent.Event is
+// embedded flat; "kind" distinguishes it from other records.
 type envelope struct {
 	Kind recordKind `json:"kind"`
 	intent.Event
+}
+
+// osEnvelope is the on-disk shape of an OS ground-truth event line.
+type osEnvelope struct {
+	Kind recordKind `json:"kind"`
+	capture.Event
 }
 
 // SessionsDir returns ~/.pounce/sessions, creating it if needed.
@@ -66,8 +75,11 @@ func NewID(start time.Time) string {
 	return start.UTC().Format("20060102-150405.000")
 }
 
-// Writer appends records to a session log.
+// Writer appends records to a session log. It is safe for concurrent use: the
+// protocol tee and the OS-event stream (from the daemon) write from separate
+// goroutines, so every write is serialized under mu.
 type Writer struct {
+	mu   sync.Mutex
 	f    *os.File
 	bw   *bufio.Writer
 	enc  *json.Encoder
@@ -108,7 +120,20 @@ func (w *Writer) Path() string { return w.path }
 // useless while an agent is still running. MCP traffic is low-volume, so the
 // extra write syscall per message is negligible.
 func (w *Writer) WriteEvent(e intent.Event) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
 	if err := w.enc.Encode(envelope{Kind: kindEvent, Event: e}); err != nil {
+		return err
+	}
+	return w.bw.Flush()
+}
+
+// WriteOSEvent appends one OS ground-truth event (from the daemon) and flushes
+// it, with the same live-view and concurrency guarantees as WriteEvent.
+func (w *Writer) WriteOSEvent(e capture.Event) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if err := w.enc.Encode(osEnvelope{Kind: kindOS, Event: e}); err != nil {
 		return err
 	}
 	return w.bw.Flush()
@@ -116,6 +141,8 @@ func (w *Writer) WriteEvent(e intent.Event) error {
 
 // Close flushes and closes the file.
 func (w *Writer) Close() error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
 	if err := w.bw.Flush(); err != nil {
 		w.f.Close()
 		return err
@@ -125,8 +152,9 @@ func (w *Writer) Close() error {
 
 // Session is a fully-read session log.
 type Session struct {
-	Header Header
-	Events []intent.Event
+	Header   Header
+	Events   []intent.Event
+	OSEvents []capture.Event
 }
 
 // Read loads and parses a session log from path. Malformed lines are skipped
@@ -170,6 +198,12 @@ func Read(path string) (*Session, error) {
 				ev.Msg = &m
 			}
 			s.Events = append(s.Events, ev)
+		case kindOS:
+			var env osEnvelope
+			if err := json.Unmarshal(line, &env); err != nil {
+				continue
+			}
+			s.OSEvents = append(s.OSEvents, env.Event)
 		}
 	}
 	if err := sc.Err(); err != nil {

@@ -28,6 +28,7 @@ func main() {
 
 	root.AddCommand(newWrapCmd())
 	root.AddCommand(newViewCmd())
+	root.AddCommand(newDaemonCmd())
 
 	if err := root.Execute(); err != nil {
 		// If the wrapped child exited non-zero, mirror its exit code without

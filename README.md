@@ -79,20 +79,23 @@ Three deliberately decoupled parts:
 - **Intent source (pluggable):** captures the *declared* action — the tool call.
   The stdio tee is the first source; an HTTP/SSE proxy and a log/hook ingester
   slot in behind the same interface later.
-- **OS-capture core (Phase 2):** the *actual* effect — files/exec/network,
+- **OS-capture core (Phase 2+):** the *actual* effect — network via the system
+  `tcpdump` on `pktap` (Phase 2), files/exec via `eslogger` (Phase 4) —
   attributed by PID subtree.
 - **Correlator (Phase 3):** joins intent ↔ effect by PID + time, and flags when
   actual behavior diverges from what a call declared.
 
-v0.1.0 ships the intent source (stdio) only.
-
 ## Roadmap
 
-- **Phase 1 (this release):** stdio shim + protocol tee.
-- **Phase 2:** macOS OS ground truth (`eslogger` + `pktap`).
-- **Phase 3:** correlation + divergence detection.
-- **Phase 4:** richer TUI / optional localhost web UI.
-- **Phase 5:** packaging (goreleaser, Homebrew tap, curl installer).
+- **Phase 1:** stdio shim + protocol tee. No privileges.
+- **Phase 2:** network ground truth — system `tcpdump` on the `pktap` interface
+  (per-process network). Root-only, **no Full Disk Access**.
+- **Phase 3:** correlation + discrepancy detection, built on intent + network.
+  **MVP = Phases 1–3**, and it needs zero FDA — the headline exfil demo lives here.
+- **Phase 4:** `eslogger` file/exec capture (files read, processes spawned).
+  Root **+ Full Disk Access**; opt-in enrichment.
+- **Phase 5:** readable TUI / optional `--web` localhost UI.
+- **Phase 6:** packaging (goreleaser, Homebrew tap, curl installer).
 
 ## License
 

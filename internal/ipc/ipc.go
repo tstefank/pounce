@@ -27,7 +27,17 @@ const (
 	MsgRegister MsgType = "register"
 	// MsgOSEvent: daemon -> shim, streamed. Carries one attributed Event.
 	MsgOSEvent MsgType = "osevent"
+	// MsgCaptureInfo: daemon -> shim, once after register. Capture provenance.
+	MsgCaptureInfo MsgType = "capture_info"
 )
+
+// CaptureInfo records how OS events were captured, for the session log — so a
+// later format/tooling drift is diagnosable.
+type CaptureInfo struct {
+	Tcpdump string `json:"tcpdump,omitempty"` // system tcpdump --version
+	OS      string `json:"os,omitempty"`      // macOS product version
+	Mode    string `json:"mode,omitempty"`    // capture mechanism, e.g. "pktap text -k NP"
+}
 
 // Message is one line on the wire.
 type Message struct {
@@ -35,6 +45,7 @@ type Message struct {
 	SessionID string         `json:"session_id,omitempty"`
 	RootPID   int            `json:"root_pid,omitempty"`
 	Event     *capture.Event `json:"event,omitempty"`
+	Capture   *CaptureInfo   `json:"capture,omitempty"`
 }
 
 // Listen creates the daemon's Unix socket, removing any stale one, and makes it

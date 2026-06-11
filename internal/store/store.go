@@ -28,10 +28,18 @@ import (
 type recordKind string
 
 const (
-	kindHeader recordKind = "header"
-	kindEvent  recordKind = "event"
-	kindOS     recordKind = "os" // OS ground-truth event (Phase 2)
+	kindHeader  recordKind = "header"
+	kindEvent   recordKind = "event"
+	kindOS      recordKind = "os"      // OS ground-truth event (Phase 2)
+	kindCapture recordKind = "capture" // capture provenance (tcpdump/OS version)
 )
+
+// CaptureInfo records how OS events were captured, for provenance.
+type CaptureInfo struct {
+	Tcpdump string `json:"tcpdump,omitempty"`
+	OS      string `json:"os,omitempty"`
+	Mode    string `json:"mode,omitempty"`
+}
 
 // Header is the first line of a session log: metadata about the wrap run.
 type Header struct {
@@ -54,6 +62,12 @@ type envelope struct {
 type osEnvelope struct {
 	Kind recordKind `json:"kind"`
 	capture.Event
+}
+
+// captureEnvelope is the on-disk shape of a capture-provenance line.
+type captureEnvelope struct {
+	Kind recordKind `json:"kind"`
+	CaptureInfo
 }
 
 // SessionsDir returns ~/.pounce/sessions, creating it if needed.
@@ -139,6 +153,17 @@ func (w *Writer) WriteOSEvent(e capture.Event) error {
 	return w.bw.Flush()
 }
 
+// WriteCaptureInfo records capture provenance (the tcpdump and OS versions that
+// produced the OS events), so later tooling/format drift is diagnosable.
+func (w *Writer) WriteCaptureInfo(ci CaptureInfo) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if err := w.enc.Encode(captureEnvelope{Kind: kindCapture, CaptureInfo: ci}); err != nil {
+		return err
+	}
+	return w.bw.Flush()
+}
+
 // Close flushes and closes the file.
 func (w *Writer) Close() error {
 	w.mu.Lock()
@@ -155,6 +180,7 @@ type Session struct {
 	Header   Header
 	Events   []intent.Event
 	OSEvents []capture.Event
+	Capture  *CaptureInfo // capture provenance, if OS capture was active
 }
 
 // Read loads and parses a session log from path. Malformed lines are skipped
@@ -204,6 +230,13 @@ func Read(path string) (*Session, error) {
 				continue
 			}
 			s.OSEvents = append(s.OSEvents, env.Event)
+		case kindCapture:
+			var env captureEnvelope
+			if err := json.Unmarshal(line, &env); err != nil {
+				continue
+			}
+			ci := env.CaptureInfo
+			s.Capture = &ci
 		}
 	}
 	if err := sc.Err(); err != nil {

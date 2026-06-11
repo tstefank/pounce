@@ -7,10 +7,13 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"os/exec"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"github.com/spf13/cobra"
+	"golang.org/x/sys/unix"
 
 	"pounce/internal/capture"
 	"pounce/internal/ipc"
@@ -50,17 +53,27 @@ func runDaemon(socket string, print bool) error {
 
 	mon := capture.NewMonitor()
 
+	// capInfo is non-nil only when capture is actually active, so the session
+	// log records provenance only for sessions whose OS events are real.
+	var capInfo *ipc.CaptureInfo
+
 	// Start the network capture source unless we lack privilege.
 	if os.Geteuid() == 0 {
 		srcCh := make(chan capture.Event, 1024)
 		src := &capture.PktapSource{}
 		go func() {
-			if err := src.Run(ctx, srcCh); err != nil && ctx.Err() == nil {
+			err := src.Run(ctx, srcCh)
+			if err != nil && ctx.Err() == nil {
 				fmt.Fprintf(os.Stderr, "pounced: pktap source stopped: %v\n", err)
+			}
+			if n := src.Unattributed(); n > 0 {
+				fmt.Fprintf(os.Stderr, "pounced: %d record lines could not be attributed (possible tcpdump format drift)\n", n)
 			}
 		}()
 		go mon.Run(ctx, srcCh)
-		fmt.Fprintln(os.Stderr, "pounced: network capture active (pktap)")
+		info := captureProvenance()
+		capInfo = &info
+		fmt.Fprintf(os.Stderr, "pounced: network capture active (pktap); %s on %s\n", info.Tcpdump, info.OS)
 	} else {
 		fmt.Fprintln(os.Stderr, "pounced: not root — capturing nothing; socket-only (run via `sudo pounce daemon` for capture)")
 		go mon.Run(ctx, make(chan capture.Event)) // keeps the poll ticker alive
@@ -85,13 +98,13 @@ func runDaemon(socket string, print bool) error {
 			fmt.Fprintf(os.Stderr, "pounced: accept: %v\n", err)
 			continue
 		}
-		go handleConn(ctx, conn, mon, print)
+		go handleConn(ctx, conn, mon, capInfo, print)
 	}
 }
 
 // handleConn services one shim session: verify the peer, read its registration,
 // then stream attributed OS events back until the shim disconnects.
-func handleConn(ctx context.Context, conn *net.UnixConn, mon *capture.Monitor, print bool) {
+func handleConn(ctx context.Context, conn *net.UnixConn, mon *capture.Monitor, capInfo *ipc.CaptureInfo, print bool) {
 	defer conn.Close()
 
 	peer, err := ipc.PeerCred(conn)
@@ -112,11 +125,17 @@ func handleConn(ctx context.Context, conn *net.UnixConn, mon *capture.Monitor, p
 	out := make(chan capture.Event, 256)
 	mon.AddSession(ctx, reg.SessionID, reg.RootPID, out)
 
+	enc := json.NewEncoder(conn)
+	// Send capture provenance first (sequentially, before the event writer
+	// goroutine starts using enc) so the shim can record it in the session log.
+	if capInfo != nil {
+		_ = enc.Encode(ipc.Message{Type: ipc.MsgCaptureInfo, Capture: capInfo})
+	}
+
 	// Stream attributed events back to the shim.
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		enc := json.NewEncoder(conn)
 		for ev := range out {
 			if print {
 				fmt.Fprintf(os.Stderr, "pounced[%s]: %s pid=%d %s %s->%s\n",
@@ -143,6 +162,38 @@ func handleConn(ctx context.Context, conn *net.UnixConn, mon *capture.Monitor, p
 	if !errors.Is(ctx.Err(), context.Canceled) {
 		fmt.Fprintf(os.Stderr, "pounced: session %s ended\n", reg.SessionID)
 	}
+}
+
+// captureProvenance records what produced the OS events, so a later tcpdump or
+// macOS change that breaks parsing is diagnosable from the session log.
+func captureProvenance() ipc.CaptureInfo {
+	return ipc.CaptureInfo{
+		Tcpdump: tcpdumpVersion(),
+		OS:      osVersion(),
+		Mode:    "pktap text -k NP",
+	}
+}
+
+// tcpdumpVersion returns the first line of `tcpdump --version`, or "unknown".
+func tcpdumpVersion() string {
+	out, err := exec.Command("/usr/sbin/tcpdump", "--version").CombinedOutput()
+	if err != nil && len(out) == 0 {
+		return "unknown"
+	}
+	line := string(out)
+	if i := strings.IndexByte(line, '\n'); i >= 0 {
+		line = line[:i]
+	}
+	return strings.TrimSpace(line)
+}
+
+// osVersion returns the macOS product version, e.g. "macOS 26.5.1".
+func osVersion() string {
+	v, err := unix.Sysctl("kern.osproductversion")
+	if err != nil || v == "" {
+		return "macOS"
+	}
+	return "macOS " + v
 }
 
 // small helpers for the --print line; tolerate nil Net.

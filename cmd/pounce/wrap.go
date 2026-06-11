@@ -142,8 +142,17 @@ func connectDaemon(sessionID string, pid int, w *store.Writer) *net.UnixConn {
 			if err := dec.Decode(&m); err != nil {
 				return // connection closed
 			}
-			if m.Type == ipc.MsgOSEvent && m.Event != nil {
-				_ = w.WriteOSEvent(*m.Event)
+			switch m.Type {
+			case ipc.MsgOSEvent:
+				if m.Event != nil {
+					_ = w.WriteOSEvent(*m.Event)
+				}
+			case ipc.MsgCaptureInfo:
+				if m.Capture != nil {
+					_ = w.WriteCaptureInfo(store.CaptureInfo{
+						Tcpdump: m.Capture.Tcpdump, OS: m.Capture.OS, Mode: m.Capture.Mode,
+					})
+				}
 			}
 		}
 	}()

@@ -129,6 +129,31 @@ func TestWriteEventFlushesImmediately(t *testing.T) {
 	}
 }
 
+func TestCaptureInfoRoundTrip(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	start := time.Date(2026, 6, 11, 12, 0, 0, 0, time.UTC)
+	w, err := Create(Header{ID: NewID(start), PounceVer: "t", StartedAt: start, Command: "srv"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ci := CaptureInfo{Tcpdump: "tcpdump version 4.99.1", OS: "macOS 26.5.1", Mode: "pktap text -k NP"}
+	if err := w.WriteCaptureInfo(ci); err != nil {
+		t.Fatal(err)
+	}
+	w.Close()
+
+	sess, err := Read(w.Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sess.Capture == nil {
+		t.Fatal("capture provenance not read back")
+	}
+	if sess.Capture.Tcpdump != ci.Tcpdump || sess.Capture.OS != ci.OS || sess.Capture.Mode != ci.Mode {
+		t.Errorf("capture round-trip mismatch: %+v", sess.Capture)
+	}
+}
+
 func TestResolveAndLatest(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

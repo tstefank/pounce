@@ -59,6 +59,10 @@ func Timeline(w io.Writer, s *store.Session, color bool) {
 	fmt.Fprintf(w, "session %s\n", st.method(h.ID))
 	fmt.Fprintf(w, "command: %s\n", cmd)
 	fmt.Fprintf(w, "started: %s\n", h.StartedAt.Format(time.RFC3339))
+	if s.Capture != nil {
+		fmt.Fprintf(w, "capture: %s (%s, %s)\n",
+			st.dim(s.Capture.Mode), st.dim(s.Capture.Tcpdump), st.dim(s.Capture.OS))
+	}
 	fmt.Fprintf(w, "events:  %d\n\n", len(s.Events))
 
 	// Match responses to requests direction-aware: a request is answered by a

@@ -46,7 +46,7 @@ func TestTimelineDirectionAwareMatching(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	Timeline(&buf, s, false)
+	Timeline(&buf, s, false, 0)
 	out := buf.String()
 
 	// initialize must show the server info from the server's response, not the
@@ -73,7 +73,7 @@ func TestTimelineToolCallAndError(t *testing.T) {
 		},
 	}
 	var buf bytes.Buffer
-	Timeline(&buf, s, false)
+	Timeline(&buf, s, false, 0)
 	out := buf.String()
 
 	if !strings.Contains(out, "tools/call read_file") || !strings.Contains(out, `"path":"/etc/hosts"`) {
@@ -100,8 +100,8 @@ func TestTimelineColor(t *testing.T) {
 	}
 
 	var plain, colored bytes.Buffer
-	Timeline(&plain, s, false)
-	Timeline(&colored, s, true)
+	Timeline(&plain, s, false, 0)
+	Timeline(&colored, s, true, 0)
 
 	if strings.Contains(plain.String(), "\x1b[") {
 		t.Errorf("plain output should contain no ANSI escapes:\n%q", plain.String())
@@ -123,7 +123,7 @@ func TestTimelineToolExecutionError(t *testing.T) {
 		},
 	}
 	var buf bytes.Buffer
-	Timeline(&buf, s, false)
+	Timeline(&buf, s, false, 0)
 	out := buf.String()
 
 	if !strings.Contains(out, "-> tool error: Tool does-not-exist not found") {
@@ -171,7 +171,7 @@ func TestTimelineOrphanResponse(t *testing.T) {
 		},
 	}
 	var buf bytes.Buffer
-	Timeline(&buf, s, false)
+	Timeline(&buf, s, false, 0)
 	out := buf.String()
 	if !strings.Contains(out, "(response id 99)") || !strings.Contains(out, "file:///x") {
 		t.Errorf("orphan response not surfaced:\n%s", out)

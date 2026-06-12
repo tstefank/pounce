@@ -72,6 +72,31 @@ project `.mcp.json`:
 }
 ```
 
+### OS ground truth (network tier, opt-in)
+
+Phase 1 (above) is the *declared* intent — the tool calls. To also see the
+*actual* per-process network activity those calls cause, run the capture daemon
+once. It's an opt-in upgrade: **root, but no Full Disk Access**.
+
+```sh
+sudo pounce daemon        # privileged capture (system tcpdump on pktap)
+```
+
+With the daemon running, `pounce wrap` automatically reports its child PID
+subtree to it (no flag, no privilege on the shim side) and records the
+attributed connections into the same session log. No daemon running → `wrap`
+behaves exactly as in Phase 1. `pounce view` then interleaves the network
+events into the timeline:
+
+```
+13:01:27.809 · net  udp 172.20.10.1:53       out  curl pid 50592
+13:01:28.517 · net  tcp 104.20.23.154:443    out  curl pid 50592   ← the connection a tool caused
+```
+
+The capture is observe-only and attributed by PID subtree. On current macOS the
+PID comes from the system tcpdump's pktap metadata (`-k NP`); the session log
+records the `tcpdump`/OS versions for provenance.
+
 ## How it works
 
 Three deliberately decoupled parts:

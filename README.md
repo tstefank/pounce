@@ -108,7 +108,10 @@ Three deliberately decoupled parts:
   `tcpdump` on `pktap` (Phase 2), files/exec via `eslogger` (Phase 4) —
   attributed by PID subtree.
 - **Correlator (Phase 3):** joins intent ↔ effect by PID + time, and flags when
-  actual behavior diverges from what a call declared.
+  actual behavior diverges — including a connection to an IP that no DNS lookup
+  produced (a hardcoded/exfil destination), caught even inside a benign call's
+  window. See [docs/correlation.md](docs/correlation.md) for the mechanics and
+  caveats.
 
 ## Roadmap
 

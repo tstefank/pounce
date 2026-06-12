@@ -138,8 +138,7 @@ func handleConn(ctx context.Context, conn *net.UnixConn, mon *capture.Monitor, c
 		defer close(done)
 		for ev := range out {
 			if print {
-				fmt.Fprintf(os.Stderr, "pounced[%s]: %s pid=%d %s %s->%s\n",
-					reg.SessionID, ev.Op, ev.PID, netProto(ev), netLocal(ev), netRemote(ev))
+				fmt.Fprintf(os.Stderr, "pounced[%s]: %s\n", reg.SessionID, printEvent(ev))
 			}
 			if err := enc.Encode(ipc.Message{Type: ipc.MsgOSEvent, Event: &ev}); err != nil {
 				return // shim went away
@@ -196,22 +195,17 @@ func osVersion() string {
 	return "macOS " + v
 }
 
-// small helpers for the --print line; tolerate nil Net.
-func netProto(e capture.Event) string {
-	if e.Net != nil {
-		return e.Net.Proto
+// printEvent formats an attributed OS event for the --print line.
+func printEvent(e capture.Event) string {
+	switch e.Op {
+	case capture.OpConnect:
+		if e.Net != nil {
+			return fmt.Sprintf("connect pid=%d %s %s->%s", e.PID, e.Net.Proto, e.Net.Local, e.Net.Remote)
+		}
+	case capture.OpResolve:
+		if e.Resolve != nil {
+			return fmt.Sprintf("resolve pid=%d %s -> %s", e.PID, e.Resolve.Host, strings.Join(e.Resolve.IPs, ","))
+		}
 	}
-	return ""
-}
-func netLocal(e capture.Event) string {
-	if e.Net != nil {
-		return e.Net.Local
-	}
-	return ""
-}
-func netRemote(e capture.Event) string {
-	if e.Net != nil {
-		return e.Net.Remote
-	}
-	return ""
+	return fmt.Sprintf("%s pid=%d", e.Op, e.PID)
 }

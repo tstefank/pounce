@@ -2,6 +2,7 @@ package correlate
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -127,6 +128,47 @@ func fetchReq(id, url string, t time.Time) intent.Event {
 	msgs, _ := protocol.ParseLine([]byte(raw))
 	m := msgs[0]
 	return intent.Event{TS: t, Dir: intent.ClientToServer, Raw: json.RawMessage(raw), Msg: &m}
+}
+
+// TestCorrelate_ParallelCallsAttributeByDestination: two concurrent fetch calls
+// to different hosts; each connection attributes to the call that declared its
+// host, not merely the most recently started one.
+func TestCorrelate_ParallelCallsAttributeByDestination(t *testing.T) {
+	s := &store.Session{
+		Events: []intent.Event{
+			fetchReq("1", "https://alpha.example", at(0)),  // call A
+			fetchReq("2", "https://beta.example", at(100)), // call B (started later)
+			resp("1", at(900)),
+			resp("2", at(1000)),
+		},
+		OSEvents: []capture.Event{
+			resolveEvent("alpha.example", at(20), "10.0.0.1"),
+			resolveEvent("beta.example", at(120), "10.0.0.2"),
+			// Both connections happen while BOTH calls are active. By time alone
+			// both would go to B (most recent); by destination they split.
+			conn("10.0.0.1:443", at(200)), // alpha → must attribute to A
+			conn("10.0.0.2:443", at(250)), // beta  → must attribute to B
+		},
+	}
+	r := Correlate(s, DefaultWindow)
+
+	// Both calls are tools/call "fetch"; distinguish by their args.
+	var aConns, bConns []string
+	for _, l := range r.Links {
+		for _, c := range l.Connections {
+			if strings.Contains(l.Args, "alpha") {
+				aConns = append(aConns, c.Remote())
+			} else if strings.Contains(l.Args, "beta") {
+				bConns = append(bConns, c.Remote())
+			}
+		}
+	}
+	if len(aConns) != 1 || aConns[0] != "10.0.0.1:443" {
+		t.Errorf("alpha call should own 10.0.0.1, got %v", aConns)
+	}
+	if len(bConns) != 1 || bConns[0] != "10.0.0.2:443" {
+		t.Errorf("beta call should own 10.0.0.2, got %v", bConns)
+	}
 }
 
 func TestCorrelate_OverlappingCallsPickMostRecent(t *testing.T) {

@@ -47,6 +47,96 @@ func (s styler) arrow(d intent.Direction) string {
 	}
 }
 
+// Summary writes a verdict-first, grouped view: a one-line verdict, then each
+// tool call with the connections it caused (✓ explained / ⚠ undeclared), then a
+// compact footer. It answers "what happened, and is anything wrong" at a glance;
+// `--timeline` (Timeline) gives the full chronological protocol + OS log.
+func Summary(w io.Writer, s *store.Session, color bool, window time.Duration) {
+	st := styler{on: color}
+	h := s.Header
+	cmd := h.Command
+	if len(h.Args) > 0 {
+		cmd += " " + strings.Join(h.Args, " ")
+	}
+	fmt.Fprintf(w, "%s  %s\n", cmd, st.dim(h.ID))
+
+	r := correlate.Correlate(s, window)
+	und := r.UndeclaredDestinations()
+
+	switch {
+	case len(und) > 0:
+		fmt.Fprintln(w, st.errc(fmt.Sprintf("⚠ %d undeclared connection%s", len(und), plural(len(und)))))
+	case len(s.OSEvents) == 0:
+		fmt.Fprintln(w, st.dim("· no OS capture (run `sudo pounce daemon` to see the connections each call caused)"))
+	case len(r.OutOfBand) > 0:
+		fmt.Fprintln(w, st.dim(fmt.Sprintf("○ %d out-of-band connection%s (no active tool call)", len(r.OutOfBand), plural(len(r.OutOfBand)))))
+	default:
+		fmt.Fprintln(w, st.ok("✓ no divergence"))
+	}
+	fmt.Fprintln(w)
+
+	calls, conns := 0, 0
+	for _, l := range r.Links {
+		// Skip protocol boilerplate (initialize/tools/list) that caused nothing.
+		if l.Tool == "" && len(l.Connections) == 0 {
+			continue
+		}
+		label := st.method(l.Method)
+		if l.Tool != "" {
+			calls++
+			label = st.method(l.Method) + " " + st.tool(l.Tool)
+		}
+		args := ""
+		if l.Args != "" {
+			args = "  " + st.dim(oneLine(l.Args, 60))
+		}
+		if len(l.Connections) == 0 {
+			fmt.Fprintf(w, "  %s%s  %s\n", label, args, st.dim("(no network)"))
+			continue
+		}
+		fmt.Fprintf(w, "  %s%s\n", label, args)
+		for _, c := range l.Connections {
+			conns++
+			fmt.Fprintf(w, "     %s\n", summaryConn(st, c))
+		}
+	}
+	if len(r.OutOfBand) > 0 {
+		fmt.Fprintf(w, "  %s\n", st.dim("out-of-band — no active tool call:"))
+		for _, c := range r.OutOfBand {
+			conns++
+			fmt.Fprintf(w, "     %s\n", summaryConn(st, c))
+		}
+	}
+
+	fmt.Fprintf(w, "\n%s\n", st.dim(fmt.Sprintf(
+		"%d tool call%s · %d connection%s · %d flagged    (--timeline for the full log)",
+		calls, plural(calls), conns, plural(conns), len(und))))
+}
+
+// summaryConn renders one connection for the grouped view.
+func summaryConn(st styler, c correlate.Conn) string {
+	proto := ""
+	if c.Event.Net != nil {
+		proto = c.Event.Net.Proto
+	}
+	dest := proto + " " + c.Remote()
+	switch {
+	case !c.Resolved:
+		return fmt.Sprintf("%s %s  %s", st.errc("⚠"), st.errc(dest), st.dim("undeclared — no DNS lookup"))
+	case c.Declared:
+		return fmt.Sprintf("%s %s  %s", st.ok("✓"), st.ok(dest), st.dim(c.Host))
+	default:
+		return fmt.Sprintf("%s %s  %s", st.ok("✓"), st.ok(dest), st.dim(c.Host+" (not declared)"))
+	}
+}
+
+func plural(n int) string {
+	if n == 1 {
+		return ""
+	}
+	return "s"
+}
+
 // Timeline writes a tool-call timeline for the session to w. When color is true
 // the output is decorated with ANSI escape codes. window is the correlation
 // window (<=0 uses correlate.DefaultWindow).

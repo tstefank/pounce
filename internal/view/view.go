@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"pounce/internal/capture"
+	"pounce/internal/correlate"
 	"pounce/internal/intent"
 	"pounce/internal/protocol"
 	"pounce/internal/store"
@@ -207,6 +208,54 @@ func Timeline(w io.Writer, s *store.Session, color bool) {
 		summary += fmt.Sprintf(", %d OS events", osEvents)
 	}
 	fmt.Fprintln(w, summary)
+
+	renderCorrelation(w, st, s)
+}
+
+// renderCorrelation shows the intent↔effect join: which tool call caused which
+// connections, and — the divergence signal — connections that no active call
+// explains. Shown only when OS events were captured.
+func renderCorrelation(w io.Writer, st styler, s *store.Session) {
+	if len(s.OSEvents) == 0 {
+		return
+	}
+	r := correlate.Correlate(s, correlate.DefaultWindow)
+	fmt.Fprintf(w, "\ncorrelation %s:\n", st.dim(fmt.Sprintf("(window %s)", r.Window)))
+
+	attributed := false
+	for _, l := range r.Links {
+		if len(l.Connections) == 0 {
+			continue
+		}
+		attributed = true
+		label := st.method(l.Method)
+		if l.Tool != "" {
+			label += " " + st.tool(l.Tool)
+		}
+		fmt.Fprintf(w, "  %s %s\n", label, st.dim(fmt.Sprintf("→ caused %d", len(l.Connections))))
+		for _, c := range l.Connections {
+			proto, remote, who := connParts(c)
+			fmt.Fprintf(w, "      %s %s  %s\n", proto, st.ok(remote), st.dim(who))
+		}
+	}
+	if !attributed {
+		fmt.Fprintf(w, "  %s\n", st.dim("(no connections attributed to a tool call)"))
+	}
+	if len(r.OutOfBand) > 0 {
+		fmt.Fprintf(w, "  %s\n", st.errc(fmt.Sprintf("⚠ %d out-of-band — no active tool call:", len(r.OutOfBand))))
+		for _, c := range r.OutOfBand {
+			proto, remote, who := connParts(c)
+			fmt.Fprintf(w, "      %s %s  %s\n", proto, st.errc(remote), st.dim(who))
+		}
+	}
+}
+
+// connParts splits an OS connect event into display fields.
+func connParts(c capture.Event) (proto, remote, who string) {
+	if c.Net != nil {
+		proto, remote = c.Net.Proto, c.Net.Remote
+	}
+	return proto, remote, fmt.Sprintf("%s pid %d", c.Proc, c.PID)
 }
 
 // errorsLabel colors the error count red when nonzero.

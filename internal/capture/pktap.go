@@ -28,6 +28,16 @@ const seenCap = 1 << 15
 // only when the structure matches exactly — and notice when it doesn't (drift).
 var pktapLineRe = regexp.MustCompile(`^\d{2}:\d{2}:\d{2}\.\d+ \(([^)]*)\) (.*)$`)
 
+// DNS detail patterns (tcpdump decodes DNS even with -nn):
+//
+//	query:    "26885+ A? example.com. (29)"
+//	response: "26885 2/0/0 A 172.66.147.243, A 104.20.23.154 (61)"
+var (
+	dnsQueryRe    = regexp.MustCompile(`^(\d+)\S* (?:A|AAAA)\? (\S+)`)
+	dnsResponseRe = regexp.MustCompile(`^(\d+) \d+/\d+/\d+ (.*)`)
+	dnsAnswerRe   = regexp.MustCompile(`\b(?:A|AAAA) ([0-9A-Fa-f:.]+)`)
+)
+
 // parseResult classifies a line so the caller can fail safe and measure drift.
 type parseResult int
 
@@ -50,6 +60,7 @@ type PktapSource struct {
 	IsLocal func(string) bool // reports whether an IP is one of ours; defaults to local interfaces
 
 	seen         map[string]bool
+	dnsQueries   map[string]string // DNS txn id -> queried host, to join query→response
 	unattributed atomic.Int64
 }
 
@@ -75,6 +86,7 @@ func (s *PktapSource) Run(ctx context.Context, out chan<- Event) error {
 		s.IsLocal = func(ip string) bool { return local[ip] }
 	}
 	s.seen = map[string]bool{}
+	s.dnsQueries = map[string]string{}
 
 	// -i pktap,all : every interface with per-packet metadata
 	// -k NP        : include process Name and PID metadata
@@ -135,9 +147,15 @@ func (s *PktapSource) parseLine(line string) (Event, string, parseResult) {
 	}
 	meta, rest := m[1], m[2]
 
-	nf, ipok := parseIPLine(rest, s.IsLocal)
+	nf, detail, ipok := parseIPLine(rest, s.IsLocal)
 	if !ipok {
 		return Event{}, "", parseSkip // non-IP frame (ARP, ethertype, …): not ours
+	}
+
+	// DNS packets carry the host→IP mappings the correlator needs; handle them
+	// specially (and don't also emit them as plain connections).
+	if portOf(nf.Local) == "53" || portOf(nf.Remote) == "53" {
+		return s.handleDNS(meta, detail)
 	}
 
 	pid, proc, found := parseProcMeta(meta)
@@ -151,6 +169,41 @@ func (s *PktapSource) parseLine(line string) (Event, string, parseResult) {
 
 	key := nf.Proto + "|" + strconv.Itoa(pid) + "|" + nf.Local + "|" + nf.Remote
 	return Event{Op: OpConnect, PID: pid, Proc: proc, Net: &nf}, key, parseOK
+}
+
+// handleDNS records a query's host (joined later by transaction id) and emits a
+// resolve Event from a response that carries A/AAAA answers.
+func (s *PktapSource) handleDNS(meta, detail string) (Event, string, parseResult) {
+	if mm := dnsQueryRe.FindStringSubmatch(detail); mm != nil {
+		s.dnsQueries[mm[1]] = strings.TrimSuffix(mm[2], ".")
+		if len(s.dnsQueries) > seenCap {
+			s.dnsQueries = map[string]string{}
+		}
+		return Event{}, "", parseSkip // a query alone yields no event
+	}
+	if mm := dnsResponseRe.FindStringSubmatch(detail); mm != nil {
+		var ips []string
+		for _, a := range dnsAnswerRe.FindAllStringSubmatch(mm[2], -1) {
+			ips = append(ips, a[1])
+		}
+		host := s.dnsQueries[mm[1]]
+		if host == "" && len(ips) == 0 {
+			return Event{}, "", parseSkip
+		}
+		pid, proc, _ := parseProcMeta(meta) // effective proc (the resolver's client)
+		ev := Event{Op: OpResolve, PID: pid, Proc: proc, Resolve: &Resolve{Host: host, IPs: ips}}
+		key := "resolve|" + host + "|" + strings.Join(ips, ",")
+		return ev, key, parseOK
+	}
+	return Event{}, "", parseSkip // a DNS packet we don't decode (other qtypes)
+}
+
+// portOf returns the port of a "host:port" endpoint, or "".
+func portOf(hostport string) string {
+	if i := strings.LastIndexByte(hostport, ':'); i >= 0 {
+		return hostport[i+1:]
+	}
+	return ""
 }
 
 // isTimestamped reports whether line begins HH:MM:SS.<frac> (a tcpdump record,
@@ -203,8 +256,9 @@ func splitNamePID(s string) (name string, pid int, ok bool) {
 }
 
 // parseIPLine parses the packet portion (after the metadata) into a normalized
-// NetFlow. It accepts IPv4 ("IP ") and IPv6 ("IP6 "). ok is false for non-IP.
-func parseIPLine(rest string, isLocal func(string) bool) (NetFlow, bool) {
+// NetFlow plus the trailing protocol detail (used for DNS). It accepts IPv4
+// ("IP ") and IPv6 ("IP6 "). ok is false for non-IP.
+func parseIPLine(rest string, isLocal func(string) bool) (nf NetFlow, detail string, ok bool) {
 	var payload string
 	switch {
 	case strings.HasPrefix(rest, "IP "):
@@ -212,16 +266,16 @@ func parseIPLine(rest string, isLocal func(string) bool) (NetFlow, bool) {
 	case strings.HasPrefix(rest, "IP6 "):
 		payload = rest[4:]
 	default:
-		return NetFlow{}, false
+		return NetFlow{}, "", false
 	}
 
 	gt := strings.Index(payload, " > ")
 	if gt < 0 {
-		return NetFlow{}, false
+		return NetFlow{}, "", false
 	}
 	aStr := payload[:gt]
 	r := payload[gt+3:]
-	var bStr, detail string
+	var bStr string
 	if c := strings.Index(r, ": "); c >= 0 {
 		bStr, detail = r[:c], r[c+2:]
 	} else {
@@ -231,10 +285,10 @@ func parseIPLine(rest string, isLocal func(string) bool) (NetFlow, bool) {
 	aHost, aPort, aok := splitDotPort(aStr)
 	bHost, bPort, bok := splitDotPort(bStr)
 	if !aok || !bok {
-		return NetFlow{}, false
+		return NetFlow{}, "", false
 	}
 
-	nf := NetFlow{Proto: "udp", Bytes: parseLength(detail)}
+	nf = NetFlow{Proto: "udp", Bytes: parseLength(detail)}
 	if strings.Contains(detail, "Flags [") {
 		nf.Proto = "tcp"
 	}
@@ -249,7 +303,7 @@ func parseIPLine(rest string, isLocal func(string) bool) (NetFlow, bool) {
 	default:
 		nf.Local, nf.Remote = a, b // neither local: best effort
 	}
-	return nf, true
+	return nf, detail, true
 }
 
 // splitDotPort splits "192.168.1.16.63188" (or an IPv6 "2603::1.443") into host

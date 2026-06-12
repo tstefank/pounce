@@ -72,9 +72,61 @@ func TestCorrelate_FlagsOutOfBandConnection(t *testing.T) {
 	if r.Attributed() != 0 {
 		t.Errorf("expected 0 attributed, got %d", r.Attributed())
 	}
-	if len(r.OutOfBand) != 1 || r.OutOfBand[0].Net.Remote != "evil.example:443" {
+	if len(r.OutOfBand) != 1 || r.OutOfBand[0].Remote() != "evil.example:443" {
 		t.Fatalf("expected the connection flagged out-of-band, got %+v", r.OutOfBand)
 	}
+}
+
+// resolve builds a DNS-resolution OS event (host -> ips).
+func resolveEvent(host string, t time.Time, ips ...string) capture.Event {
+	return capture.Event{TS: t, Op: capture.OpResolve, PID: 42, Proc: "node",
+		Resolve: &capture.Resolve{Host: host, IPs: ips}}
+}
+
+// TestCorrelate_DestinationDivergence is the teeth: a connection to an IP no DNS
+// produced is flagged even when it lands inside a call's window.
+func TestCorrelate_DestinationDivergence(t *testing.T) {
+	s := &store.Session{
+		Events: []intent.Event{
+			fetchReq("1", "https://example.com/data", at(0)),
+			resp("1", at(800)),
+		},
+		OSEvents: []capture.Event{
+			resolveEvent("example.com", at(50), "93.184.216.34"),
+			conn("93.184.216.34:443", at(100)), // declared host's resolved IP
+			conn("45.83.12.9:443", at(300)),    // hardcoded IP, no DNS — exfil
+		},
+	}
+	r := Correlate(s, DefaultWindow)
+
+	und := r.UndeclaredDestinations()
+	if len(und) != 1 || und[0].Remote() != "45.83.12.9:443" {
+		t.Fatalf("expected the hardcoded IP flagged undeclared, got %+v", und)
+	}
+
+	// Find the example.com connection: resolved AND declared.
+	var found bool
+	for _, l := range r.Links {
+		for _, c := range l.Connections {
+			if c.Remote() == "93.184.216.34:443" {
+				found = true
+				if !c.Resolved || c.Host != "example.com" || !c.Declared {
+					t.Errorf("example.com conn analysis wrong: %+v", c)
+				}
+			}
+		}
+	}
+	if !found {
+		t.Error("the declared connection was not attributed")
+	}
+}
+
+// fetchReq builds a tools/call with a URL argument.
+func fetchReq(id, url string, t time.Time) intent.Event {
+	raw := `{"jsonrpc":"2.0","id":` + id + `,"method":"tools/call","params":{"name":"fetch","arguments":{"url":"` + url + `"}}}`
+	msgs, _ := protocol.ParseLine([]byte(raw))
+	m := msgs[0]
+	return intent.Event{TS: t, Dir: intent.ClientToServer, Raw: json.RawMessage(raw), Msg: &m}
 }
 
 func TestCorrelate_OverlappingCallsPickMostRecent(t *testing.T) {

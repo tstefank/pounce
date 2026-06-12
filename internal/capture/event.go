@@ -16,7 +16,15 @@ type Op string
 
 const (
 	OpConnect Op = "connect" // a network packet/flow attributed to a process
+	OpResolve Op = "resolve" // a DNS resolution: a host name mapped to IPs
 )
+
+// Resolve holds the host->IPs mapping of a DNS resolution, so the correlator can
+// check whether a later connection's IP actually came from a declared host.
+type Resolve struct {
+	Host string   `json:"host,omitempty"`
+	IPs  []string `json:"ips,omitempty"`
+}
 
 // NetFlow holds the network-tier details of an event, sourced from pktap
 // per-packet metadata. Endpoints are normalized to local/remote (rather than
@@ -34,10 +42,11 @@ type NetFlow struct {
 // Monitor can attribute it to a session by PID subtree. Raw preserves the
 // source line for forensics and debugging.
 type Event struct {
-	TS   time.Time `json:"ts"`
-	Op   Op        `json:"op"`
-	PID  int       `json:"pid"`
-	Proc string    `json:"proc,omitempty"` // process name from the source
-	Net  *NetFlow  `json:"net,omitempty"`
-	Raw  string    `json:"raw,omitempty"`
+	TS      time.Time `json:"ts"`
+	Op      Op        `json:"op"`
+	PID     int       `json:"pid"`
+	Proc    string    `json:"proc,omitempty"`    // process name from the source
+	Net     *NetFlow  `json:"net,omitempty"`     // for OpConnect
+	Resolve *Resolve  `json:"resolve,omitempty"` // for OpResolve
+	Raw     string    `json:"raw,omitempty"`
 }

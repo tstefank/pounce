@@ -98,6 +98,7 @@ func (r Result) UndeclaredDestinations() []Conn {
 type window struct {
 	idx        int
 	start, end time.Time
+	hosts      map[string]bool // hosts declared in this call's args
 }
 
 // Correlate joins the session's requests to its OS events and analyzes each
@@ -145,15 +146,17 @@ func Correlate(s *store.Session, w time.Duration) Result {
 			end = rt.Add(w)
 		}
 		link := Link{CallTS: start, Method: e.Msg.Method}
+		hosts := map[string]bool{}
 		if tc, ok := e.Msg.AsToolCall(); ok {
 			link.Tool = tc.Name
 			link.Args = string(tc.Arguments)
 			for _, h := range hostsIn(link.Args) {
 				declared[h] = true
+				hosts[h] = true
 			}
 		}
 		res.Links = append(res.Links, link)
-		wins = append(wins, window{idx: len(res.Links) - 1, start: start, end: end})
+		wins = append(wins, window{idx: len(res.Links) - 1, start: start, end: end, hosts: hosts})
 	}
 
 	for _, oe := range s.OSEvents {
@@ -161,7 +164,12 @@ func Correlate(s *store.Session, w time.Duration) Result {
 			continue // resolves are evidence, not connections to correlate
 		}
 		c := classify(oe, ip2host, declared)
-		best := -1
+
+		// Among the calls active when the connection happened, prefer the one
+		// whose arguments declared this destination's host — so concurrent calls
+		// attribute by *where they said they'd go*, not merely by timing. Fall
+		// back to the most recently started active call.
+		best, byHost := -1, -1
 		for i := range wins {
 			if oe.TS.Before(wins[i].start) || oe.TS.After(wins[i].end) {
 				continue
@@ -169,6 +177,14 @@ func Correlate(s *store.Session, w time.Duration) Result {
 			if best < 0 || wins[i].start.After(wins[best].start) {
 				best = i
 			}
+			if c.Host != "" && wins[i].hosts[strings.ToLower(c.Host)] {
+				if byHost < 0 || wins[i].start.After(wins[byHost].start) {
+					byHost = i
+				}
+			}
+		}
+		if byHost >= 0 {
+			best = byHost
 		}
 		if best < 0 {
 			res.OutOfBand = append(res.OutOfBand, c)

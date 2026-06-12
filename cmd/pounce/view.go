@@ -17,31 +17,33 @@ func newViewCmd() *cobra.Command {
 		session   string
 		colorWhen string
 		window    time.Duration
+		timeline  bool
 	)
 
 	cmd := &cobra.Command{
 		Use:   "view",
-		Short: "Print the tool-call timeline from a session log",
-		Long: `view reads a recorded session log and prints a timeline of JSON-RPC
-activity, pairing each tool call with its response.
+		Short: "Show what a wrapped session did: tool calls, the connections they caused, and divergence",
+		Long: `view reads a recorded session log and, by default, prints a verdict-first
+summary: each tool call with the connections it caused (✓ explained / ⚠
+undeclared destination), led by a one-line verdict.
 
-With no --session, the most recent session is shown. When OS events were
-captured, a correlation section ties each tool call to the connections it caused
-and flags out-of-band ones; --window tunes how long after a call a connection
-still counts as caused by it.`,
+With no --session, the most recent session is shown. --timeline prints the full
+chronological protocol + OS log instead. --window tunes how long after a call a
+connection still counts as caused by it.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runView(session, colorWhen, window)
+			return runView(session, colorWhen, window, timeline)
 		},
 	}
 
 	cmd.Flags().StringVar(&session, "session", "", "session id or path to a .jsonl log (default: most recent)")
 	cmd.Flags().StringVar(&colorWhen, "color", "auto", "colorize output: auto|always|never")
 	cmd.Flags().DurationVar(&window, "window", correlate.DefaultWindow, "correlation window: how long after a call a connection still counts as caused by it")
+	cmd.Flags().BoolVar(&timeline, "timeline", false, "print the full chronological protocol + OS log instead of the summary")
 	return cmd
 }
 
-func runView(session, colorWhen string, window time.Duration) error {
+func runView(session, colorWhen string, window time.Duration, timeline bool) error {
 	path, err := store.Resolve(session)
 	if err != nil {
 		return err
@@ -54,7 +56,11 @@ func runView(session, colorWhen string, window time.Duration) error {
 	if err != nil {
 		return err
 	}
-	view.Timeline(os.Stdout, s, color, window)
+	if timeline {
+		view.Timeline(os.Stdout, s, color, window)
+	} else {
+		view.Summary(os.Stdout, s, color, window)
+	}
 	return nil
 }
 

@@ -235,8 +235,7 @@ func renderCorrelation(w io.Writer, st styler, s *store.Session, window time.Dur
 		}
 		fmt.Fprintf(w, "  %s %s\n", label, st.dim(fmt.Sprintf("→ caused %d", len(l.Connections))))
 		for _, c := range l.Connections {
-			proto, remote, who := connParts(c)
-			fmt.Fprintf(w, "      %s %s  %s\n", proto, st.ok(remote), st.dim(who))
+			fmt.Fprintf(w, "      %s\n", connLine(st, c))
 		}
 	}
 	if !attributed {
@@ -245,18 +244,41 @@ func renderCorrelation(w io.Writer, st styler, s *store.Session, window time.Dur
 	if len(r.OutOfBand) > 0 {
 		fmt.Fprintf(w, "  %s\n", st.errc(fmt.Sprintf("⚠ %d out-of-band — no active tool call:", len(r.OutOfBand))))
 		for _, c := range r.OutOfBand {
-			proto, remote, who := connParts(c)
-			fmt.Fprintf(w, "      %s %s  %s\n", proto, st.errc(remote), st.dim(who))
+			fmt.Fprintf(w, "      %s\n", connLine(st, c))
+		}
+	}
+	// The sharpest signal: an IP no DNS lookup produced (hardcoded/exfil),
+	// regardless of timing.
+	if und := r.UndeclaredDestinations(); len(und) > 0 {
+		fmt.Fprintf(w, "  %s\n", st.errc(fmt.Sprintf("⚠ %d undeclared destination(s) — IP not resolved from any host:", len(und))))
+		for _, c := range und {
+			fmt.Fprintf(w, "      %s\n", connLine(st, c))
 		}
 	}
 }
 
-// connParts splits an OS connect event into display fields.
-func connParts(c capture.Event) (proto, remote, who string) {
-	if c.Net != nil {
-		proto, remote = c.Net.Proto, c.Net.Remote
+// connLine formats one analyzed connection: destination, the host it resolved
+// from (or an unresolved flag), and the process.
+func connLine(st styler, c correlate.Conn) string {
+	proto := ""
+	if c.Event.Net != nil {
+		proto = c.Event.Net.Proto
 	}
-	return proto, remote, fmt.Sprintf("%s pid %d", c.Proc, c.PID)
+	remote := c.Remote()
+	var annot string
+	switch {
+	case !c.Resolved:
+		annot = st.errc("(unresolved — no DNS)")
+		remote = st.errc(remote)
+	case c.Declared:
+		annot = st.dim("(" + c.Host + ", declared)")
+		remote = st.ok(remote)
+	default:
+		annot = st.errc("(" + c.Host + ", host not declared)")
+		remote = st.ok(remote)
+	}
+	who := st.dim(fmt.Sprintf("%s pid %d", c.Event.Proc, c.Event.PID))
+	return fmt.Sprintf("%s %s  %s  %s", proto, remote, annot, who)
 }
 
 // errorsLabel colors the error count red when nonzero.
@@ -317,6 +339,14 @@ func renderOSEvent(st styler, e capture.Event) string {
 		}
 		return fmt.Sprintf("%s %s  %s %s  %s  %s",
 			ts, st.dim("· net"), proto, st.remote(remote), st.dim(dir), who)
+	case capture.OpResolve:
+		host, ips := "", ""
+		if e.Resolve != nil {
+			host = e.Resolve.Host
+			ips = strings.Join(e.Resolve.IPs, ", ")
+		}
+		return fmt.Sprintf("%s %s  %s %s  %s",
+			ts, st.dim("· dns"), host, st.dim("→ "+ips), who)
 	default:
 		return fmt.Sprintf("%s %s  %s", ts, st.dim("· os"), who)
 	}

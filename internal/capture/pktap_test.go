@@ -59,16 +59,6 @@ func TestParseLine_RealPktapSamples(t *testing.T) {
 			wantDir:    "in",
 		},
 		{
-			name:       "udp dns response (no Flags -> udp)",
-			line:       `21:43:24.976460 (proc mDNSResponder:638, eproc curl:32765) IP 192.168.1.1.53 > 192.168.1.16.59662: 26885 2/0/0 A 172.66.147.243, A 104.20.23.154 (61)`,
-			want:       parseOK,
-			wantPID:    32765,
-			wantProc:   "curl",
-			wantProto:  "udp",
-			wantRemote: "192.168.1.1:53",
-			wantDir:    "in",
-		},
-		{
 			name: "empty metadata () -> skip (legit no proc)",
 			line: `21:43:24.979108 () IP 192.168.1.16.63188 > 172.66.147.243.443: Flags [SEW], seq 277501803, win 65535, length 0`,
 			want: parseSkip,
@@ -150,6 +140,39 @@ func TestParseLine_DedupKeyStableAcrossPackets(t *testing.T) {
 	}
 	if k1 != k2 {
 		t.Errorf("same connection produced different keys:\n %q\n %q", k1, k2)
+	}
+}
+
+// TestDNSResolution feeds a DNS query then its response (real tcpdump format)
+// and asserts the parser joins them into a resolve event (host -> IPs), the raw
+// material for destination-divergence detection.
+func TestDNSResolution(t *testing.T) {
+	src := &PktapSource{IsLocal: localTest}
+	src.dnsQueries = map[string]string{}
+
+	// The query (often unattributed) records the host by transaction id.
+	q := `21:43:24.962780 () IP 192.168.1.16.59662 > 192.168.1.1.53: 26885+ A? example.com. (29)`
+	if _, _, res := src.parseLine(q); res != parseSkip {
+		t.Fatalf("DNS query should be parseSkip, got %v", res)
+	}
+
+	// The response (eproc = the resolving client) carries the answer IPs.
+	r := `21:43:24.976460 (proc mDNSResponder:638, eproc curl:32765) IP 192.168.1.1.53 > 192.168.1.16.59662: 26885 2/0/0 A 172.66.147.243, A 104.20.23.154 (61)`
+	ev, _, res := src.parseLine(r)
+	if res != parseOK {
+		t.Fatalf("DNS response should be parseOK, got %v", res)
+	}
+	if ev.Op != OpResolve || ev.Resolve == nil {
+		t.Fatalf("expected an OpResolve event, got %+v", ev)
+	}
+	if ev.Resolve.Host != "example.com" {
+		t.Errorf("host = %q, want example.com", ev.Resolve.Host)
+	}
+	if len(ev.Resolve.IPs) != 2 || ev.Resolve.IPs[0] != "172.66.147.243" || ev.Resolve.IPs[1] != "104.20.23.154" {
+		t.Errorf("ips = %v, want [172.66.147.243 104.20.23.154]", ev.Resolve.IPs)
+	}
+	if ev.PID != 32765 { // attributed to the effective (resolving) process
+		t.Errorf("pid = %d, want 32765", ev.PID)
 	}
 }
 

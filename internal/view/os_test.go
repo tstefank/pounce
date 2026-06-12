@@ -39,7 +39,7 @@ func TestTimelineInterleavesOSEvents(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	Timeline(&buf, s, false)
+	Timeline(&buf, s, false, 0)
 	out := buf.String()
 
 	// The OS connect line must appear, with the remote destination and process.

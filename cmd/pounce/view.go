@@ -3,9 +3,11 @@ package main
 import (
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/spf13/cobra"
 
+	"pounce/internal/correlate"
 	"pounce/internal/store"
 	"pounce/internal/view"
 )
@@ -14,6 +16,7 @@ func newViewCmd() *cobra.Command {
 	var (
 		session   string
 		colorWhen string
+		window    time.Duration
 	)
 
 	cmd := &cobra.Command{
@@ -22,19 +25,23 @@ func newViewCmd() *cobra.Command {
 		Long: `view reads a recorded session log and prints a timeline of JSON-RPC
 activity, pairing each tool call with its response.
 
-With no --session, the most recent session is shown.`,
+With no --session, the most recent session is shown. When OS events were
+captured, a correlation section ties each tool call to the connections it caused
+and flags out-of-band ones; --window tunes how long after a call a connection
+still counts as caused by it.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runView(session, colorWhen)
+			return runView(session, colorWhen, window)
 		},
 	}
 
 	cmd.Flags().StringVar(&session, "session", "", "session id or path to a .jsonl log (default: most recent)")
 	cmd.Flags().StringVar(&colorWhen, "color", "auto", "colorize output: auto|always|never")
+	cmd.Flags().DurationVar(&window, "window", correlate.DefaultWindow, "correlation window: how long after a call a connection still counts as caused by it")
 	return cmd
 }
 
-func runView(session, colorWhen string) error {
+func runView(session, colorWhen string, window time.Duration) error {
 	path, err := store.Resolve(session)
 	if err != nil {
 		return err
@@ -47,7 +54,7 @@ func runView(session, colorWhen string) error {
 	if err != nil {
 		return err
 	}
-	view.Timeline(os.Stdout, s, color)
+	view.Timeline(os.Stdout, s, color, window)
 	return nil
 }
 

@@ -48,8 +48,9 @@ func (s styler) arrow(d intent.Direction) string {
 }
 
 // Timeline writes a tool-call timeline for the session to w. When color is true
-// the output is decorated with ANSI escape codes.
-func Timeline(w io.Writer, s *store.Session, color bool) {
+// the output is decorated with ANSI escape codes. window is the correlation
+// window (<=0 uses correlate.DefaultWindow).
+func Timeline(w io.Writer, s *store.Session, color bool, window time.Duration) {
 	st := styler{on: color}
 
 	h := s.Header
@@ -209,17 +210,17 @@ func Timeline(w io.Writer, s *store.Session, color bool) {
 	}
 	fmt.Fprintln(w, summary)
 
-	renderCorrelation(w, st, s)
+	renderCorrelation(w, st, s, window)
 }
 
 // renderCorrelation shows the intent↔effect join: which tool call caused which
 // connections, and — the divergence signal — connections that no active call
 // explains. Shown only when OS events were captured.
-func renderCorrelation(w io.Writer, st styler, s *store.Session) {
+func renderCorrelation(w io.Writer, st styler, s *store.Session, window time.Duration) {
 	if len(s.OSEvents) == 0 {
 		return
 	}
-	r := correlate.Correlate(s, correlate.DefaultWindow)
+	r := correlate.Correlate(s, window)
 	fmt.Fprintf(w, "\ncorrelation %s:\n", st.dim(fmt.Sprintf("(window %s)", r.Window)))
 
 	attributed := false

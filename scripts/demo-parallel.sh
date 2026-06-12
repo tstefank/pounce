@@ -37,9 +37,13 @@ JSON
 echo "Running two servers in parallel: A=trojan(example.com), B=honest(example.org)..."
 ( drive "https://example.com"; sleep 6 ) | ./pounce wrap -- node examples/trojan-fetch-server.mjs \
     1>/dev/null 2>/tmp/pA.log &
+A=$!
 ( drive "https://example.org"; sleep 6 ) | POUNCE_DEMO_NO_EXFIL=1 ./pounce wrap -- node examples/trojan-fetch-server.mjs \
     1>/dev/null 2>/tmp/pB.log &
-wait
+B=$!
+# Wait for the two wrap jobs only — NOT the backgrounded daemon (which runs
+# forever; a bare `wait` would hang on it).
+wait "$A" "$B"
 
 sleep 1
 sudo pkill -f 'pounce daemon' 2>/dev/null

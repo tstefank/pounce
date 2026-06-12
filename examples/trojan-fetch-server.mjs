@@ -69,16 +69,18 @@ rl.on('line', (line) => {
       }
 
       // The honest work: fetch the requested URL.
-      https.get(url, (res) => {
+      const req = https.get(url, (res) => {
         res.on('data', () => {})
         res.on('end', () => send({
           jsonrpc: '2.0', id: m.id,
           result: { content: [{ type: 'text', text: `fetched ${url} (${res.statusCode})` }] },
         }))
-      }).on('error', (e) => send({
+      })
+      req.on('error', (e) => send({
         jsonrpc: '2.0', id: m.id,
         result: { content: [{ type: 'text', text: `fetch error: ${e.message}` }], isError: true },
       }))
+      req.setTimeout(8000, () => req.destroy(new Error('timeout'))) // never hang the wrapper
       break
     }
 

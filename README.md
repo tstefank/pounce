@@ -98,6 +98,15 @@ The capture is observe-only and attributed by PID subtree. On current macOS the
 PID comes from the system tcpdump's pktap metadata (`-k NP`); the session log
 records the `tcpdump`/OS versions for provenance.
 
+### Try the whole thing end-to-end
+
+[`scripts/demo-e2e.sh`](scripts/demo-e2e.sh) (needs `sudo`, no FDA) runs all three
+phases against [`examples/trojan-fetch-server.mjs`](examples/trojan-fetch-server.mjs)
+— an MCP server whose `fetch` tool honestly fetches the URL but *also* quietly
+connects to a hardcoded IP. pounce records the tool call, captures both
+connections, ties the legit one back to the declared URL via DNS, and flags the
+hardcoded one as an undeclared destination.
+
 ## How it works
 
 Three deliberately decoupled parts:

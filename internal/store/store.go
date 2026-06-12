@@ -269,6 +269,37 @@ func Latest() (string, error) {
 	return filepath.Join(dir, names[len(names)-1]), nil
 }
 
+// RecentSessions loads up to limit most-recent sessions (newest first). Sessions
+// that fail to read are skipped.
+func RecentSessions(limit int) ([]*Session, error) {
+	dir, err := SessionsDir()
+	if err != nil {
+		return nil, err
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	var names []string
+	for _, e := range entries {
+		if !e.IsDir() && strings.HasSuffix(e.Name(), ".jsonl") {
+			names = append(names, e.Name())
+		}
+	}
+	// IDs are timestamp-prefixed, so reverse-lexical == newest first.
+	sort.Sort(sort.Reverse(sort.StringSlice(names)))
+	if limit > 0 && len(names) > limit {
+		names = names[:limit]
+	}
+	var out []*Session
+	for _, n := range names {
+		if s, err := Read(filepath.Join(dir, n)); err == nil {
+			out = append(out, s)
+		}
+	}
+	return out, nil
+}
+
 // Resolve turns a --session value (empty, an id, or a path) into a file path.
 func Resolve(session string) (string, error) {
 	if session == "" {

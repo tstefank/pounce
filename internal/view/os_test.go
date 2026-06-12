@@ -15,6 +15,46 @@ func at(sec int) time.Time {
 	return time.Date(2026, 6, 10, 12, 0, sec, 0, time.UTC)
 }
 
+// TestSummaryVerdictAndGrouping checks the default view: a verdict line and each
+// tool call's connections labeled ✓ (explained) / ⚠ (undeclared).
+func TestSummaryVerdictAndGrouping(t *testing.T) {
+	mkReq := func() intent.Event {
+		e := ev(intent.ClientToServer, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"fetch","arguments":{"url":"https://api.example.com"}}}`)
+		e.TS = at(0)
+		return e
+	}
+	mkResp := func() intent.Event {
+		e := ev(intent.ServerToClient, `{"jsonrpc":"2.0","id":1,"result":{}}`)
+		e.TS = at(2)
+		return e
+	}
+	s := &store.Session{
+		Header: store.Header{ID: "t", Command: "srv"},
+		Events: []intent.Event{mkReq(), mkResp()},
+		OSEvents: []capture.Event{
+			{TS: at(1), Op: capture.OpResolve, PID: 9, Proc: "node", Resolve: &capture.Resolve{Host: "api.example.com", IPs: []string{"1.2.3.4"}}},
+			{TS: at(1), Op: capture.OpConnect, PID: 9, Proc: "node", Net: &capture.NetFlow{Proto: "tcp", Remote: "1.2.3.4:443", Dir: "out"}},
+			{TS: at(1), Op: capture.OpConnect, PID: 9, Proc: "node", Net: &capture.NetFlow{Proto: "tcp", Remote: "45.83.12.9:443", Dir: "out"}},
+		},
+	}
+	var buf bytes.Buffer
+	Summary(&buf, s, false, 0)
+	out := buf.String()
+
+	if !strings.Contains(out, "⚠ 1 undeclared connection") {
+		t.Errorf("missing verdict:\n%s", out)
+	}
+	if !strings.Contains(out, "✓ tcp 1.2.3.4:443  api.example.com") {
+		t.Errorf("declared connection not shown as explained:\n%s", out)
+	}
+	if !strings.Contains(out, "⚠ tcp 45.83.12.9:443  undeclared") {
+		t.Errorf("undeclared connection not flagged:\n%s", out)
+	}
+	if !strings.Contains(out, "1 tool call · 2 connections · 1 flagged") {
+		t.Errorf("footer wrong:\n%s", out)
+	}
+}
+
 // TestTimelineInterleavesOSEvents checks that OS events are merged into the
 // protocol timeline in timestamp order and rendered with their destination.
 func TestTimelineInterleavesOSEvents(t *testing.T) {

@@ -113,6 +113,72 @@ func Summary(w io.Writer, s *store.Session, color bool, window time.Duration) {
 		calls, plural(calls), conns, plural(conns), len(und))))
 }
 
+// Roster renders a one-line verdict per session (newest first) — the overview
+// for several wrapped servers running at once. Flagged sessions expand to show
+// their undeclared connections.
+func Roster(w io.Writer, sessions []*store.Session, color bool, window time.Duration) {
+	st := styler{on: color}
+	if len(sessions) == 0 {
+		fmt.Fprintln(w, st.dim("no sessions in ~/.pounce/sessions"))
+		return
+	}
+
+	type row struct {
+		s   *store.Session
+		und []correlate.Conn
+	}
+	var rows []row
+	flagged := 0
+	for _, s := range sessions {
+		r := correlate.Correlate(s, window)
+		und := r.UndeclaredDestinations()
+		if len(und) > 0 {
+			flagged++
+		}
+		rows = append(rows, row{s, und})
+	}
+
+	if flagged > 0 {
+		fmt.Fprintf(w, "%s\n\n", st.errc(fmt.Sprintf("⚠ %d of %d session%s flagged", flagged, len(rows), plural(len(rows)))))
+	} else {
+		fmt.Fprintf(w, "%s\n\n", st.ok(fmt.Sprintf("✓ %d session%s, none flagged", len(rows), plural(len(rows)))))
+	}
+
+	for _, rw := range rows {
+		cmd := rw.s.Header.Command
+		if len(rw.s.Header.Args) > 0 {
+			cmd += " " + strings.Join(rw.s.Header.Args, " ")
+		}
+		mark, _ := sessionVerdict(st, rw.s, len(rw.und))
+		count := ""
+		if len(rw.und) > 0 {
+			count = "  " + st.errc(fmt.Sprintf("(%d undeclared)", len(rw.und)))
+		}
+		fmt.Fprintf(w, "%s %s  %s%s\n", mark, oneLine(cmd, 56), st.dim(rw.s.Header.ID), count)
+		const showMax = 3
+		for i, c := range rw.und {
+			if i == showMax {
+				fmt.Fprintf(w, "     %s\n", st.dim(fmt.Sprintf("… and %d more", len(rw.und)-showMax)))
+				break
+			}
+			fmt.Fprintf(w, "     %s\n", summaryConn(st, c))
+		}
+	}
+	fmt.Fprintf(w, "\n%s\n", st.dim(fmt.Sprintf("%d session%s · %d flagged    (pounce view --session <id> for one)", len(rows), plural(len(rows)), flagged)))
+}
+
+// sessionVerdict returns the marker glyph for a session's status.
+func sessionVerdict(st styler, s *store.Session, undeclared int) (mark string, flagged bool) {
+	switch {
+	case undeclared > 0:
+		return st.errc("⚠"), true
+	case len(s.OSEvents) == 0:
+		return st.dim("·"), false
+	default:
+		return st.ok("✓"), false
+	}
+}
+
 // summaryConn renders one connection for the grouped view.
 func summaryConn(st styler, c correlate.Conn) string {
 	proto := ""

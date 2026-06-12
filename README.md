@@ -7,9 +7,10 @@ surfaces every JSON-RPC message that flows through it. It's **observe-only**: it
 watches and records, and never blocks, modifies, or injects into the stream —
 the wrapped server behaves exactly as if pounce weren't there.
 
-> **v0.1.1 (Phase 1):** the stdio shim + protocol tee. No privileges required.
-> OS-level capture (files/network/processes) and intent↔effect correlation are
-> on the roadmap — see [Roadmap](#roadmap).
+> **v0.3.0 — the MVP (Phases 1–3), zero Full Disk Access:** tool-call timeline
+> (no privileges), per-process network capture (opt-in `sudo pounce daemon`,
+> root only), and intent↔effect correlation with divergence flagging. File/exec
+> capture (`eslogger`) is Phase 4 — see [Roadmap](#roadmap).
 
 ## Install
 

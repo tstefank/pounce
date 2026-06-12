@@ -18,6 +18,7 @@ func newViewCmd() *cobra.Command {
 		colorWhen string
 		window    time.Duration
 		timeline  bool
+		all       bool
 	)
 
 	cmd := &cobra.Command{
@@ -32,7 +33,7 @@ chronological protocol + OS log instead. --window tunes how long after a call a
 connection still counts as caused by it.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runView(session, colorWhen, window, timeline)
+			return runView(session, colorWhen, window, timeline, all)
 		},
 	}
 
@@ -40,10 +41,25 @@ connection still counts as caused by it.`,
 	cmd.Flags().StringVar(&colorWhen, "color", "auto", "colorize output: auto|always|never")
 	cmd.Flags().DurationVar(&window, "window", correlate.DefaultWindow, "correlation window: how long after a call a connection still counts as caused by it")
 	cmd.Flags().BoolVar(&timeline, "timeline", false, "print the full chronological protocol + OS log instead of the summary")
+	cmd.Flags().BoolVar(&all, "all", false, "show a one-line verdict for every recent session (overview of parallel servers)")
 	return cmd
 }
 
-func runView(session, colorWhen string, window time.Duration, timeline bool) error {
+func runView(session, colorWhen string, window time.Duration, timeline, all bool) error {
+	color, err := resolveColor(colorWhen, os.Stdout)
+	if err != nil {
+		return err
+	}
+
+	if all {
+		sessions, err := store.RecentSessions(25)
+		if err != nil {
+			return fmt.Errorf("list sessions: %w", err)
+		}
+		view.Roster(os.Stdout, sessions, color, window)
+		return nil
+	}
+
 	path, err := store.Resolve(session)
 	if err != nil {
 		return err
@@ -51,10 +67,6 @@ func runView(session, colorWhen string, window time.Duration, timeline bool) err
 	s, err := store.Read(path)
 	if err != nil {
 		return fmt.Errorf("read session %s: %w", path, err)
-	}
-	color, err := resolveColor(colorWhen, os.Stdout)
-	if err != nil {
-		return err
 	}
 	if timeline {
 		view.Timeline(os.Stdout, s, color, window)

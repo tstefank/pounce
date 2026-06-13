@@ -80,6 +80,37 @@ func TestMonitorAncestryAttribution(t *testing.T) {
 	}
 }
 
+// TestMonitorBroadcastsResolves: a DNS resolution reaches every session, since
+// the host→IP fact is shared (the resolver is often not in any subtree).
+func TestMonitorBroadcastsResolves(t *testing.T) {
+	m := NewMonitor()
+	m.snapshot = func(context.Context) (map[int]int, error) { return map[int]int{}, nil }
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	outA := make(chan Event, 4)
+	outB := make(chan Event, 4)
+	m.AddSession(ctx, "A", 100, outA)
+	m.AddSession(ctx, "B", 400, outB)
+
+	in := make(chan Event)
+	go m.Run(ctx, in)
+
+	// A resolve from an unrelated PID (e.g. mDNSResponder) must reach both.
+	in <- Event{PID: 638, Op: OpResolve, Resolve: &Resolve{Host: "example.com", IPs: []string{"1.2.3.4"}}}
+
+	for name, out := range map[string]chan Event{"A": outA, "B": outB} {
+		select {
+		case e := <-out:
+			if e.Op != OpResolve || e.Resolve.Host != "example.com" {
+				t.Errorf("session %s got wrong event: %+v", name, e)
+			}
+		case <-time.After(time.Second):
+			t.Errorf("session %s did not receive the broadcast resolve", name)
+		}
+	}
+}
+
 func TestMonitorMultipleSessions(t *testing.T) {
 	m := NewMonitor()
 	m.snapshot = func(context.Context) (map[int]int, error) {

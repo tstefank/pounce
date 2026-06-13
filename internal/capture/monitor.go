@@ -108,12 +108,24 @@ func (m *Monitor) refreshAll(ctx context.Context) {
 	}
 }
 
-// route delivers e to the session whose subtree contains e.PID. Delivery is
-// non-blocking: if a session's channel is full the event is dropped rather than
-// stalling capture (the same observe-only discipline as the protocol tee).
+// route delivers e to the appropriate session(s). A connection is owned by a
+// process, so it goes to the session whose subtree contains its PID. A DNS
+// resolution is shared system knowledge (the host→IP fact isn't owned by the
+// process that happened to ask, and the resolver is often mDNSResponder), so it
+// is broadcast to every session — a connection can then be explained regardless
+// of which process did the lookup. Delivery is non-blocking (observe-only).
 func (m *Monitor) route(e Event) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if e.Op == OpResolve {
+		for _, s := range m.sessions {
+			select {
+			case s.out <- e:
+			default:
+			}
+		}
+		return
+	}
 	if s := m.sessionForPIDLocked(e.PID); s != nil {
 		select {
 		case s.out <- e:

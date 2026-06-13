@@ -83,10 +83,11 @@ func SessionsDir() (string, error) {
 	return dir, nil
 }
 
-// NewID builds a session id from a start time. The caller passes the time so
-// the value is deterministic and testable.
+// NewID builds a session id from a start time, suffixed with the process id so
+// two shims that start in the same millisecond (parallel servers) get distinct
+// ids — and distinct log files. The timestamp prefix keeps ids sortable.
 func NewID(start time.Time) string {
-	return start.UTC().Format("20060102-150405.000")
+	return fmt.Sprintf("%s-%d", start.UTC().Format("20060102-150405.000"), os.Getpid())
 }
 
 // Writer appends records to a session log. It is safe for concurrent use: the

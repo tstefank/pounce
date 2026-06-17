@@ -3,8 +3,13 @@
 # honest. The daemon attributes each server's connections to its own session by
 # PID subtree; `pounce view --all` shows both with their verdicts side by side.
 #
-#   Server A: fetch(example.com)  — also leaks to a hardcoded IP  → ⚠ flagged
-#   Server B: fetch(example.org)  — honest (POUNCE_DEMO_NO_EXFIL) → ✓ clean
+#   Server A: fetch(host_a)  — also leaks to a hardcoded IP  → ⚠ flagged
+#   Server B: fetch(host_b)  — honest (POUNCE_DEMO_NO_EXFIL) → ✓ clean
+#
+# Hostnames are unique-per-run via sslip.io (<label>.<ip>.sslip.io resolves to
+# <ip>), which forces a FRESH DNS lookup each run — so the resolution is captured
+# on the wire instead of served from the OS cache (the demo would otherwise hit
+# the DNS-cache caveat and mis-flag the legit connections).
 #
 # Usage:  ./scripts/demo-parallel.sh        (needs sudo; root, no FDA)
 set -u
@@ -18,11 +23,13 @@ sudo -v || { echo "sudo required"; exit 1; }
 
 sudo pkill -f 'pounce daemon' 2>/dev/null
 sleep 1
-sudo dscacheutil -flushcache 2>/dev/null
-sudo killall -HUP mDNSResponder 2>/dev/null
+
+ts=$(date +%s%N)
+HOST_A="a${ts}.93.184.216.34.sslip.io" # resolves to 93.184.216.34 (example.com's IP)
+HOST_B="b${ts}.1.0.0.1.sslip.io"       # resolves to 1.0.0.1
 
 echo "Starting capture daemon..."
-sudo ./pounce daemon 2>/tmp/pounced.log &
+sudo ./pounce daemon --print 2>/tmp/pounced.log &
 sleep 1.5
 
 drive() { # $1 = url
@@ -34,20 +41,22 @@ drive() { # $1 = url
 JSON
 }
 
-echo "Running two servers in parallel: A=trojan(example.com), B=honest(example.org)..."
-( drive "https://example.com"; sleep 6 ) | ./pounce wrap -- node examples/trojan-fetch-server.mjs \
+echo "Running two servers in parallel: A=trojan($HOST_A), B=honest($HOST_B)..."
+( drive "https://$HOST_A"; sleep 6 ) | ./pounce wrap -- node examples/trojan-fetch-server.mjs \
     1>/dev/null 2>/tmp/pA.log &
 A=$!
-( drive "https://example.org"; sleep 6 ) | POUNCE_DEMO_NO_EXFIL=1 ./pounce wrap -- node examples/trojan-fetch-server.mjs \
+( drive "https://$HOST_B"; sleep 6 ) | POUNCE_DEMO_NO_EXFIL=1 ./pounce wrap -- node examples/trojan-fetch-server.mjs \
     1>/dev/null 2>/tmp/pB.log &
 B=$!
-# Wait for the two wrap jobs only — NOT the backgrounded daemon (which runs
-# forever; a bare `wait` would hang on it).
+# Wait for the two wrap jobs only — NOT the backgrounded daemon (it runs forever).
 wait "$A" "$B"
 
 sleep 1
 sudo pkill -f 'pounce daemon' 2>/dev/null
 
+echo
+echo "===== daemon captured (resolves + connects) ====="
+grep -E 'resolve|connect' /tmp/pounced.log | head
 echo
 echo "===== view --all (both sessions, newest first) ====="
 ./pounce view --color=never --all | head -8

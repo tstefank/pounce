@@ -58,5 +58,5 @@ echo
 echo "===== daemon captured (resolves + connects) ====="
 grep -E 'resolve|connect' /tmp/pounced.log | head
 echo
-echo "===== view --all (both sessions, newest first) ====="
-./pounce view --color=never --all | head -8
+echo "===== view --all (the two sessions from this run) ====="
+./pounce view --color=never --all --limit 2

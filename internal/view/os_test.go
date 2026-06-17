@@ -55,6 +55,41 @@ func TestSummaryVerdictAndGrouping(t *testing.T) {
 	}
 }
 
+// TestRoster checks the --all overview: a header count, a verdict marker per
+// session, and flagged sessions expand to show their undeclared connections (so
+// a "(N undeclared)" count is never shown without its list).
+func TestRoster(t *testing.T) {
+	flagged := &store.Session{
+		Header: store.Header{ID: "s-flagged", Command: "trojan"},
+		OSEvents: []capture.Event{
+			{Op: capture.OpConnect, PID: 1, Proc: "node", Net: &capture.NetFlow{Proto: "tcp", Remote: "1.1.1.1:443", Dir: "out"}},
+		},
+	}
+	clean := &store.Session{
+		Header: store.Header{ID: "s-clean", Command: "honest"},
+		// a connection resolved from a host → not flagged
+		OSEvents: []capture.Event{
+			{Op: capture.OpResolve, PID: 2, Proc: "node", Resolve: &capture.Resolve{Host: "ok.example", IPs: []string{"9.9.9.9"}}},
+			{Op: capture.OpConnect, PID: 2, Proc: "node", Net: &capture.NetFlow{Proto: "tcp", Remote: "9.9.9.9:443", Dir: "out"}},
+		},
+	}
+
+	var buf bytes.Buffer
+	Roster(&buf, []*store.Session{flagged, clean}, false, 0)
+	out := buf.String()
+
+	if !strings.Contains(out, "⚠ 1 of 2 sessions flagged") {
+		t.Errorf("missing header count:\n%s", out)
+	}
+	// The flagged session must expand its undeclared connection.
+	if !strings.Contains(out, "1.1.1.1:443  undeclared") {
+		t.Errorf("flagged session did not list its undeclared connection:\n%s", out)
+	}
+	if !strings.Contains(out, "s-clean") {
+		t.Errorf("clean session missing:\n%s", out)
+	}
+}
+
 // TestTimelineInterleavesOSEvents checks that OS events are merged into the
 // protocol timeline in timestamp order and rendered with their destination.
 func TestTimelineInterleavesOSEvents(t *testing.T) {

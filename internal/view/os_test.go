@@ -41,16 +41,16 @@ func TestSummaryVerdictAndGrouping(t *testing.T) {
 	Summary(&buf, s, false, 0)
 	out := buf.String()
 
-	if !strings.Contains(out, "⚠ 1 undeclared connection") {
+	if !strings.Contains(out, "? 1 connection to an IP with no DNS lookup") {
 		t.Errorf("missing verdict:\n%s", out)
 	}
 	if !strings.Contains(out, "✓ tcp 1.2.3.4:443  api.example.com") {
-		t.Errorf("declared connection not shown as explained:\n%s", out)
+		t.Errorf("declared connection not shown as confirmed:\n%s", out)
 	}
-	if !strings.Contains(out, "⚠ tcp 45.83.12.9:443  undeclared") {
-		t.Errorf("undeclared connection not flagged:\n%s", out)
+	if !strings.Contains(out, "? tcp 45.83.12.9:443  no DNS lookup") {
+		t.Errorf("no-DNS connection not marked unverified:\n%s", out)
 	}
-	if !strings.Contains(out, "1 tool call · 2 connections · 1 flagged") {
+	if !strings.Contains(out, "1 tool call · 2 connections · 1 unverified") {
 		t.Errorf("footer wrong:\n%s", out)
 	}
 }
@@ -89,7 +89,7 @@ func TestSummaryNotDeclaredMarker(t *testing.T) {
 	if strings.Contains(out, "✓") {
 		t.Errorf("a not-declared connection must not show ✓:\n%s", out)
 	}
-	if !strings.Contains(out, "0 flagged · 1 unverified") {
+	if !strings.Contains(out, "1 connection · 1 unverified") {
 		t.Errorf("footer wrong:\n%s", out)
 	}
 }
@@ -104,9 +104,12 @@ func TestRoster(t *testing.T) {
 			{Op: capture.OpConnect, PID: 1, Proc: "node", Net: &capture.NetFlow{Proto: "tcp", Remote: "1.1.1.1:443", Dir: "out"}},
 		},
 	}
+	cleanReq := ev(intent.ClientToServer, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"fetch","arguments":{"url":"https://ok.example"}}}`)
+	cleanResp := ev(intent.ServerToClient, `{"jsonrpc":"2.0","id":1,"result":{}}`)
 	clean := &store.Session{
 		Header: store.Header{ID: "s-clean", Command: "honest"},
-		// a connection resolved from a host → not flagged
+		Events: []intent.Event{cleanReq, cleanResp},
+		// connection to a declared host's resolved IP → verified ✓
 		OSEvents: []capture.Event{
 			{Op: capture.OpResolve, PID: 2, Proc: "node", Resolve: &capture.Resolve{Host: "ok.example", IPs: []string{"9.9.9.9"}}},
 			{Op: capture.OpConnect, PID: 2, Proc: "node", Net: &capture.NetFlow{Proto: "tcp", Remote: "9.9.9.9:443", Dir: "out"}},
@@ -117,12 +120,12 @@ func TestRoster(t *testing.T) {
 	Roster(&buf, []*store.Session{flagged, clean}, false, 0)
 	out := buf.String()
 
-	if !strings.Contains(out, "⚠ 1 of 2 sessions flagged") {
+	if !strings.Contains(out, "? 1 of 2 sessions with unverified connections") {
 		t.Errorf("missing header count:\n%s", out)
 	}
-	// The flagged session must expand its undeclared connection.
-	if !strings.Contains(out, "1.1.1.1:443  undeclared") {
-		t.Errorf("flagged session did not list its undeclared connection:\n%s", out)
+	// The unverified session must expand its connection (never a bare count).
+	if !strings.Contains(out, "1.1.1.1:443  no DNS lookup") {
+		t.Errorf("unverified session did not list its connection:\n%s", out)
 	}
 	if !strings.Contains(out, "s-clean") {
 		t.Errorf("clean session missing:\n%s", out)

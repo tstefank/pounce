@@ -66,10 +66,10 @@ func Summary(w io.Writer, s *store.Session, color bool, window time.Duration) {
 	notDecl := r.NotDeclared()
 
 	switch {
-	case len(und) > 0:
-		fmt.Fprintln(w, st.errc(fmt.Sprintf("⚠ %d undeclared connection%s", len(und), plural(len(und)))))
 	case len(s.OSEvents) == 0:
 		fmt.Fprintln(w, st.dim("· no OS capture (run `sudo pounce daemon` to see the connections each call caused)"))
+	case len(und) > 0:
+		fmt.Fprintln(w, st.warn(fmt.Sprintf("? %d connection%s to an IP with no DNS lookup", len(und), plural(len(und)))))
 	case len(notDecl) > 0:
 		fmt.Fprintln(w, st.warn(fmt.Sprintf("? %d connection%s to a host no call declared", len(notDecl), plural(len(notDecl)))))
 	case len(r.OutOfBand) > 0:
@@ -112,10 +112,9 @@ func Summary(w io.Writer, s *store.Session, color bool, window time.Duration) {
 		}
 	}
 
-	footer := fmt.Sprintf("%d tool call%s · %d connection%s · %d flagged",
-		calls, plural(calls), conns, plural(conns), len(und))
-	if len(notDecl) > 0 {
-		footer += fmt.Sprintf(" · %d unverified", len(notDecl))
+	footer := fmt.Sprintf("%d tool call%s · %d connection%s", calls, plural(calls), conns, plural(conns))
+	if unv := len(und) + len(notDecl); unv > 0 {
+		footer += fmt.Sprintf(" · %d unverified", unv)
 	}
 	fmt.Fprintf(w, "\n%s\n", st.dim(footer+"    (--timeline for the full log)"))
 }
@@ -132,23 +131,23 @@ func Roster(w io.Writer, sessions []*store.Session, color bool, window time.Dura
 
 	type row struct {
 		s   *store.Session
-		und []correlate.Conn
+		unv []correlate.Conn // unverified connections (no-DNS + not-declared)
 	}
 	var rows []row
-	flagged := 0
+	unverified := 0
 	for _, s := range sessions {
 		r := correlate.Correlate(s, window)
-		und := r.UndeclaredDestinations()
-		if len(und) > 0 {
-			flagged++
+		unv := append(r.UndeclaredDestinations(), r.NotDeclared()...)
+		if len(unv) > 0 {
+			unverified++
 		}
-		rows = append(rows, row{s, und})
+		rows = append(rows, row{s, unv})
 	}
 
-	if flagged > 0 {
-		fmt.Fprintf(w, "%s\n\n", st.errc(fmt.Sprintf("⚠ %d of %d session%s flagged", flagged, len(rows), plural(len(rows)))))
+	if unverified > 0 {
+		fmt.Fprintf(w, "%s\n\n", st.warn(fmt.Sprintf("? %d of %d session%s with unverified connections", unverified, len(rows), plural(len(rows)))))
 	} else {
-		fmt.Fprintf(w, "%s\n\n", st.ok(fmt.Sprintf("✓ %d session%s, none flagged", len(rows), plural(len(rows)))))
+		fmt.Fprintf(w, "%s\n\n", st.ok(fmt.Sprintf("✓ %d session%s, all connections verified", len(rows), plural(len(rows)))))
 	}
 
 	for _, rw := range rows {
@@ -156,52 +155,62 @@ func Roster(w io.Writer, sessions []*store.Session, color bool, window time.Dura
 		if len(rw.s.Header.Args) > 0 {
 			cmd += " " + strings.Join(rw.s.Header.Args, " ")
 		}
-		mark, _ := sessionVerdict(st, rw.s, len(rw.und))
+		mark := sessionVerdict(st, rw.s, len(rw.unv))
 		count := ""
-		if len(rw.und) > 0 {
-			count = "  " + st.errc(fmt.Sprintf("(%d undeclared)", len(rw.und)))
+		if len(rw.unv) > 0 {
+			count = "  " + st.warn(fmt.Sprintf("(%d unverified)", len(rw.unv)))
 		}
 		fmt.Fprintf(w, "%s %s  %s%s\n", mark, oneLine(cmd, 56), st.dim(rw.s.Header.ID), count)
 		const showMax = 3
-		for i, c := range rw.und {
+		for i, c := range rw.unv {
 			if i == showMax {
-				fmt.Fprintf(w, "     %s\n", st.dim(fmt.Sprintf("… and %d more", len(rw.und)-showMax)))
+				fmt.Fprintf(w, "     %s\n", st.dim(fmt.Sprintf("… and %d more", len(rw.unv)-showMax)))
 				break
 			}
 			fmt.Fprintf(w, "     %s\n", summaryConn(st, c))
 		}
 	}
-	fmt.Fprintf(w, "\n%s\n", st.dim(fmt.Sprintf("%d session%s · %d flagged    (pounce view --session <id> for one)", len(rows), plural(len(rows)), flagged)))
+	fmt.Fprintf(w, "\n%s\n", st.dim(fmt.Sprintf("%d session%s · %d unverified    (pounce view --session <id> for one)", len(rows), plural(len(rows)), unverified)))
 }
 
 // sessionVerdict returns the marker glyph for a session's status.
-func sessionVerdict(st styler, s *store.Session, undeclared int) (mark string, flagged bool) {
+func sessionVerdict(st styler, s *store.Session, unverified int) string {
 	switch {
-	case undeclared > 0:
-		return st.errc("⚠"), true
+	case unverified > 0:
+		return st.warn("?")
 	case len(s.OSEvents) == 0:
-		return st.dim("·"), false
+		return st.dim("·")
 	default:
-		return st.ok("✓"), false
+		return st.ok("✓")
 	}
 }
 
 // summaryConn renders one connection for the grouped view. The marker reflects
-// confidence: ✓ matches a declared host, ? resolved but the call didn't declare
-// it (couldn't confirm), ⚠ no DNS at all (a hardcoded/exfil IP).
+// confidence: ✓ matches a declared host (went where the call said), ? we
+// couldn't confirm it — either the resolved host wasn't declared, or no DNS
+// lookup was seen at all (which, given DNS caching, we can't call malicious).
 func summaryConn(st styler, c correlate.Conn) string {
 	proto := ""
 	if c.Event.Net != nil {
 		proto = c.Event.Net.Proto
 	}
 	dest := proto + " " + c.Remote()
+	mark, reason := connMark(st, c)
+	if c.Declared {
+		return fmt.Sprintf("%s %s  %s", mark, st.ok(dest), st.dim(reason))
+	}
+	return fmt.Sprintf("%s %s  %s", mark, st.warn(dest), st.dim(reason))
+}
+
+// connMark returns the confidence marker and reason for a connection.
+func connMark(st styler, c correlate.Conn) (mark, reason string) {
 	switch {
 	case !c.Resolved:
-		return fmt.Sprintf("%s %s  %s", st.errc("⚠"), st.errc(dest), st.dim("undeclared — no DNS lookup"))
+		return st.warn("?"), "no DNS lookup — unverified destination"
 	case c.Declared:
-		return fmt.Sprintf("%s %s  %s", st.ok("✓"), st.ok(dest), st.dim(c.Host))
+		return st.ok("✓"), c.Host
 	default:
-		return fmt.Sprintf("%s %s  %s", st.warn("?"), st.warn(dest), st.dim(c.Host+" — not declared"))
+		return st.warn("?"), c.Host + " — not declared"
 	}
 }
 
@@ -407,15 +416,15 @@ func renderCorrelation(w io.Writer, st styler, s *store.Session, window time.Dur
 		fmt.Fprintf(w, "  %s\n", st.dim("(no connections attributed to a tool call)"))
 	}
 	if len(r.OutOfBand) > 0 {
-		fmt.Fprintf(w, "  %s\n", st.errc(fmt.Sprintf("⚠ %d out-of-band — no active tool call:", len(r.OutOfBand))))
+		fmt.Fprintf(w, "  %s\n", st.dim(fmt.Sprintf("○ %d out-of-band — no active tool call:", len(r.OutOfBand))))
 		for _, c := range r.OutOfBand {
 			fmt.Fprintf(w, "      %s\n", connLine(st, c))
 		}
 	}
-	// The sharpest signal: an IP no DNS lookup produced (hardcoded/exfil),
-	// regardless of timing.
+	// The sharpest signal: an IP no DNS lookup produced — unverified (could be a
+	// hardcoded destination, or just a cached lookup we didn't observe).
 	if und := r.UndeclaredDestinations(); len(und) > 0 {
-		fmt.Fprintf(w, "  %s\n", st.errc(fmt.Sprintf("⚠ %d undeclared destination(s) — IP not resolved from any host:", len(und))))
+		fmt.Fprintf(w, "  %s\n", st.warn(fmt.Sprintf("? %d destination(s) with no DNS lookup (IP not resolved from any host):", len(und))))
 		for _, c := range und {
 			fmt.Fprintf(w, "      %s\n", connLine(st, c))
 		}
@@ -430,20 +439,14 @@ func connLine(st styler, c correlate.Conn) string {
 		proto = c.Event.Net.Proto
 	}
 	remote := c.Remote()
-	var mark, annot string
-	switch {
-	case !c.Resolved:
-		mark, annot = st.errc("⚠"), st.dim("(unresolved — no DNS)")
-		remote = st.errc(remote)
-	case c.Declared:
-		mark, annot = st.ok("✓"), st.dim("("+c.Host+", declared)")
+	mark, reason := connMark(st, c)
+	if c.Declared {
 		remote = st.ok(remote)
-	default:
-		mark, annot = st.warn("?"), st.dim("("+c.Host+", not declared)")
+	} else {
 		remote = st.warn(remote)
 	}
 	who := st.dim(fmt.Sprintf("%s pid %d", c.Event.Proc, c.Event.PID))
-	return fmt.Sprintf("%s %s %s  %s  %s", mark, proto, remote, annot, who)
+	return fmt.Sprintf("%s %s %s  %s  %s", mark, proto, remote, st.dim("("+reason+")"), who)
 }
 
 // errorsLabel colors the error count red when nonzero.

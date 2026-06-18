@@ -37,14 +37,22 @@ declared host (tool-call args)  →  DNS resolution (host → IP)  →  TCP conn
   by transaction id, and records `api.example.com → 93.184.216.34`.
 - Tool-call arguments are scanned for `http(s)://` URLs to learn the **declared**
   hosts.
-- Each connection's IP is then classified:
-  - **declared** — the IP was resolved from a host named in a tool call. Fully
-    explained. ✅
-  - **resolved, host not declared** — the IP came from a DNS lookup, but for a
-    host the agent never mentioned. ⚠ worth a look.
-  - **unresolved — no DNS** — the IP was produced by *no* DNS lookup in the
-    session. A hardcoded destination. **The exfil signal**, flagged regardless of
-    timing.
+Each connection then gets a **confidence marker**. A `✓` means *only* "went
+where the call said"; anything we can't confirm is a `?` (never a clean check):
+
+  - `✓` **declared + resolved** — the IP was resolved from a host named in a tool
+    call. Confirmed.
+  - `?` **resolved, host not declared** — the IP came from a DNS lookup, but for a
+    host the agent never mentioned. A real host the call didn't ask for.
+  - `?` **unresolved — no DNS** — the IP was produced by *no* DNS lookup this
+    session. Could be a hardcoded destination — but, because of DNS caching (see
+    caveats), it could equally be a cached legitimate lookup we didn't observe.
+    So it's *unverified*, not asserted-malicious.
+
+There is deliberately **no `⚠`/red verdict** for destinations: passive
+correlation rarely yields certainty, so pounce reports honest confidence (`✓`
+confirmed / `?` unverified) rather than crying wolf. A future rule layer (known-
+bad IPs, explicit allowlists) is where a hard alarm would belong.
 
 ## Reading the output
 
@@ -56,10 +64,8 @@ declared host (tool-call args)  →  DNS resolution (host → IP)  →  TCP conn
 
 correlation (window 3s):
   tools/call fetch → caused 2
-      tcp 93.184.216.34:443  (api.example.com, declared)   node pid 999
-      tcp 45.83.12.9:443     (unresolved — no DNS)          node pid 999
-  ⚠ 1 undeclared destination(s) — IP not resolved from any host:
-      tcp 45.83.12.9:443     (unresolved — no DNS)          node pid 999
+     ✓ tcp 93.184.216.34:443  api.example.com
+     ? tcp 45.83.12.9:443     no DNS lookup — unverified destination
 ```
 
 Both connections happened during the `fetch` call. Time-based attribution alone

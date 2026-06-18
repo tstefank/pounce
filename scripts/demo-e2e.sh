@@ -49,4 +49,4 @@ echo "===== daemon log (/tmp/pounced.log) ====="
 cat /tmp/pounced.log
 echo
 echo "===== TIMELINE + correlation ====="
-./pounce view --color=never
+./pounce view --all

@@ -55,6 +55,45 @@ func TestSummaryVerdictAndGrouping(t *testing.T) {
 	}
 }
 
+// TestSummaryNotDeclaredMarker: a connection to a resolved host the call never
+// declared shows ? (not a clean ✓), and drives a ? verdict.
+func TestSummaryNotDeclaredMarker(t *testing.T) {
+	mkReq := func() intent.Event {
+		e := ev(intent.ClientToServer, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"do_thing","arguments":{}}}`)
+		e.TS = at(0)
+		return e
+	}
+	mkResp := func() intent.Event {
+		e := ev(intent.ServerToClient, `{"jsonrpc":"2.0","id":1,"result":{}}`)
+		e.TS = at(2)
+		return e
+	}
+	s := &store.Session{
+		Header: store.Header{ID: "t", Command: "srv"},
+		Events: []intent.Event{mkReq(), mkResp()},
+		OSEvents: []capture.Event{
+			{TS: at(1), Op: capture.OpResolve, PID: 9, Resolve: &capture.Resolve{Host: "telemetry.vendor.net", IPs: []string{"2.2.2.2"}}},
+			{TS: at(1), Op: capture.OpConnect, PID: 9, Proc: "node", Net: &capture.NetFlow{Proto: "tcp", Remote: "2.2.2.2:443", Dir: "out"}},
+		},
+	}
+	var buf bytes.Buffer
+	Summary(&buf, s, false, 0)
+	out := buf.String()
+
+	if !strings.Contains(out, "? 1 connection to a host no call declared") {
+		t.Errorf("missing ? verdict:\n%s", out)
+	}
+	if !strings.Contains(out, "? tcp 2.2.2.2:443  telemetry.vendor.net — not declared") {
+		t.Errorf("not-declared connection not marked ?:\n%s", out)
+	}
+	if strings.Contains(out, "✓") {
+		t.Errorf("a not-declared connection must not show ✓:\n%s", out)
+	}
+	if !strings.Contains(out, "0 flagged · 1 unverified") {
+		t.Errorf("footer wrong:\n%s", out)
+	}
+}
+
 // TestRoster checks the --all overview: a header count, a verdict marker per
 // session, and flagged sessions expand to show their undeclared connections (so
 // a "(N undeclared)" count is never shown without its list).

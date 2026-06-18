@@ -79,16 +79,26 @@ func (r Result) Attributed() int {
 // UndeclaredDestinations returns every connection whose IP no DNS lookup
 // produced — the hardcoded/exfil-IP signal, regardless of timing.
 func (r Result) UndeclaredDestinations() []Conn {
+	return r.collect(func(c Conn) bool { return !c.Resolved })
+}
+
+// NotDeclared returns connections to a resolved host that no tool call declared
+// — real hosts the agent didn't ask for (a softer, "couldn't confirm" signal).
+func (r Result) NotDeclared() []Conn {
+	return r.collect(func(c Conn) bool { return c.Resolved && !c.Declared })
+}
+
+func (r Result) collect(pred func(Conn) bool) []Conn {
 	var out []Conn
 	for _, l := range r.Links {
 		for _, c := range l.Connections {
-			if !c.Resolved {
+			if pred(c) {
 				out = append(out, c)
 			}
 		}
 	}
 	for _, c := range r.OutOfBand {
-		if !c.Resolved {
+		if pred(c) {
 			out = append(out, c)
 		}
 	}

@@ -33,6 +33,7 @@ func (s styler) dim(t string) string    { return s.paint("90", t) }   // gray
 func (s styler) method(t string) string { return s.paint("1;34", t) } // bold blue
 func (s styler) tool(t string) string   { return s.paint("1;33", t) } // bold yellow
 func (s styler) ok(t string) string     { return s.paint("32", t) }   // green
+func (s styler) warn(t string) string   { return s.paint("33", t) }   // yellow: unverified
 func (s styler) errc(t string) string   { return s.paint("1;31", t) } // bold red
 func (s styler) remote(t string) string { return s.paint("1;36", t) } // bold cyan: network destination
 
@@ -62,12 +63,15 @@ func Summary(w io.Writer, s *store.Session, color bool, window time.Duration) {
 
 	r := correlate.Correlate(s, window)
 	und := r.UndeclaredDestinations()
+	notDecl := r.NotDeclared()
 
 	switch {
 	case len(und) > 0:
 		fmt.Fprintln(w, st.errc(fmt.Sprintf("⚠ %d undeclared connection%s", len(und), plural(len(und)))))
 	case len(s.OSEvents) == 0:
 		fmt.Fprintln(w, st.dim("· no OS capture (run `sudo pounce daemon` to see the connections each call caused)"))
+	case len(notDecl) > 0:
+		fmt.Fprintln(w, st.warn(fmt.Sprintf("? %d connection%s to a host no call declared", len(notDecl), plural(len(notDecl)))))
 	case len(r.OutOfBand) > 0:
 		fmt.Fprintln(w, st.dim(fmt.Sprintf("○ %d out-of-band connection%s (no active tool call)", len(r.OutOfBand), plural(len(r.OutOfBand)))))
 	default:
@@ -108,9 +112,12 @@ func Summary(w io.Writer, s *store.Session, color bool, window time.Duration) {
 		}
 	}
 
-	fmt.Fprintf(w, "\n%s\n", st.dim(fmt.Sprintf(
-		"%d tool call%s · %d connection%s · %d flagged    (--timeline for the full log)",
-		calls, plural(calls), conns, plural(conns), len(und))))
+	footer := fmt.Sprintf("%d tool call%s · %d connection%s · %d flagged",
+		calls, plural(calls), conns, plural(conns), len(und))
+	if len(notDecl) > 0 {
+		footer += fmt.Sprintf(" · %d unverified", len(notDecl))
+	}
+	fmt.Fprintf(w, "\n%s\n", st.dim(footer+"    (--timeline for the full log)"))
 }
 
 // Roster renders a one-line verdict per session (newest first) — the overview
@@ -179,7 +186,9 @@ func sessionVerdict(st styler, s *store.Session, undeclared int) (mark string, f
 	}
 }
 
-// summaryConn renders one connection for the grouped view.
+// summaryConn renders one connection for the grouped view. The marker reflects
+// confidence: ✓ matches a declared host, ? resolved but the call didn't declare
+// it (couldn't confirm), ⚠ no DNS at all (a hardcoded/exfil IP).
 func summaryConn(st styler, c correlate.Conn) string {
 	proto := ""
 	if c.Event.Net != nil {
@@ -192,7 +201,7 @@ func summaryConn(st styler, c correlate.Conn) string {
 	case c.Declared:
 		return fmt.Sprintf("%s %s  %s", st.ok("✓"), st.ok(dest), st.dim(c.Host))
 	default:
-		return fmt.Sprintf("%s %s  %s", st.ok("✓"), st.ok(dest), st.dim(c.Host+" (not declared)"))
+		return fmt.Sprintf("%s %s  %s", st.warn("?"), st.warn(dest), st.dim(c.Host+" — not declared"))
 	}
 }
 
@@ -421,20 +430,20 @@ func connLine(st styler, c correlate.Conn) string {
 		proto = c.Event.Net.Proto
 	}
 	remote := c.Remote()
-	var annot string
+	var mark, annot string
 	switch {
 	case !c.Resolved:
-		annot = st.errc("(unresolved — no DNS)")
+		mark, annot = st.errc("⚠"), st.dim("(unresolved — no DNS)")
 		remote = st.errc(remote)
 	case c.Declared:
-		annot = st.dim("(" + c.Host + ", declared)")
+		mark, annot = st.ok("✓"), st.dim("("+c.Host+", declared)")
 		remote = st.ok(remote)
 	default:
-		annot = st.errc("(" + c.Host + ", host not declared)")
-		remote = st.ok(remote)
+		mark, annot = st.warn("?"), st.dim("("+c.Host+", not declared)")
+		remote = st.warn(remote)
 	}
 	who := st.dim(fmt.Sprintf("%s pid %d", c.Event.Proc, c.Event.PID))
-	return fmt.Sprintf("%s %s  %s  %s", proto, remote, annot, who)
+	return fmt.Sprintf("%s %s %s  %s  %s", mark, proto, remote, annot, who)
 }
 
 // errorsLabel colors the error count red when nonzero.

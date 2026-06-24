@@ -9,123 +9,188 @@ import (
 	"pounce/internal/capture"
 	"pounce/internal/intent"
 	"pounce/internal/store"
+	"pounce/internal/triggers"
 )
 
 func at(sec int) time.Time {
 	return time.Date(2026, 6, 10, 12, 0, sec, 0, time.UTC)
 }
 
-// TestSummaryVerdictAndGrouping checks the default view: a verdict line and each
-// tool call's connections labeled ✓ (explained) / ⚠ (undeclared).
-func TestSummaryVerdictAndGrouping(t *testing.T) {
-	mkReq := func() intent.Event {
-		e := ev(intent.ClientToServer, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"fetch","arguments":{"url":"https://api.example.com"}}}`)
-		e.TS = at(0)
-		return e
-	}
-	mkResp := func() intent.Event {
-		e := ev(intent.ServerToClient, `{"jsonrpc":"2.0","id":1,"result":{}}`)
-		e.TS = at(2)
-		return e
-	}
+// reqAt / respAt build a tools/call request and its response at fixed times so
+// connections can be placed inside the call's execution window.
+func reqAt(tool, args string, ts time.Time) intent.Event {
+	e := ev(intent.ClientToServer, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"`+tool+`","arguments":`+args+`}}`)
+	e.TS = ts
+	return e
+}
+
+func respAt(ts time.Time) intent.Event {
+	e := ev(intent.ServerToClient, `{"jsonrpc":"2.0","id":1,"result":{}}`)
+	e.TS = ts
+	return e
+}
+
+func connAt(ts time.Time, remote string) capture.Event {
+	return capture.Event{TS: ts, Op: capture.OpConnect, PID: 9, Proc: "node",
+		Net: &capture.NetFlow{Proto: "tcp", Remote: remote, Dir: "out"}}
+}
+
+func resolveAt(ts time.Time, host string, ips ...string) capture.Event {
+	return capture.Event{TS: ts, Op: capture.OpResolve, PID: 9, Proc: "node",
+		Resolve: &capture.Resolve{Host: host, IPs: ips}}
+}
+
+// TestSummaryAlert checks the headline: a fetch that honestly hits its declared
+// host *and* dials an undeclared raw IP fires a High destination-mismatch alert,
+// with the legit connection marked ✓ and the divergent one ⚠.
+func TestSummaryAlert(t *testing.T) {
 	s := &store.Session{
 		Header: store.Header{ID: "t", Command: "srv"},
-		Events: []intent.Event{mkReq(), mkResp()},
+		Events: []intent.Event{
+			reqAt("fetch", `{"url":"https://api.example.com"}`, at(0)),
+			respAt(at(2)),
+		},
 		OSEvents: []capture.Event{
-			{TS: at(1), Op: capture.OpResolve, PID: 9, Proc: "node", Resolve: &capture.Resolve{Host: "api.example.com", IPs: []string{"1.2.3.4"}}},
-			{TS: at(1), Op: capture.OpConnect, PID: 9, Proc: "node", Net: &capture.NetFlow{Proto: "tcp", Remote: "1.2.3.4:443", Dir: "out"}},
-			{TS: at(1), Op: capture.OpConnect, PID: 9, Proc: "node", Net: &capture.NetFlow{Proto: "tcp", Remote: "45.83.12.9:443", Dir: "out"}},
+			resolveAt(at(1), "api.example.com", "1.2.3.4"),
+			connAt(at(1), "1.2.3.4:443"),    // the declared host
+			connAt(at(1), "45.83.12.9:443"), // the exfil IP
 		},
 	}
 	var buf bytes.Buffer
-	Summary(&buf, s, false, 0)
+	Summary(&buf, s, false, 0, nil)
 	out := buf.String()
 
-	if !strings.Contains(out, "? 1 connection to an IP with no DNS lookup") {
-		t.Errorf("missing verdict:\n%s", out)
+	if !strings.Contains(out, "⚠ 1 alert — destination mismatch") {
+		t.Errorf("missing alert verdict:\n%s", out)
 	}
-	if !strings.Contains(out, "✓ tcp 1.2.3.4:443  api.example.com") {
-		t.Errorf("declared connection not shown as confirmed:\n%s", out)
+	if !strings.Contains(out, "✓ tcp 1.2.3.4:443  declared api.example.com") {
+		t.Errorf("declared connection not shown as expected:\n%s", out)
 	}
-	if !strings.Contains(out, "? tcp 45.83.12.9:443  no DNS lookup") {
-		t.Errorf("no-DNS connection not marked unverified:\n%s", out)
+	if !strings.Contains(out, "⚠ tcp 45.83.12.9:443") || !strings.Contains(out, "connected to 45.83.12.9 (no DNS)") {
+		t.Errorf("divergent connection not flagged:\n%s", out)
 	}
-	if !strings.Contains(out, "1 tool call · 2 connections · 1 unverified") {
+	if !strings.Contains(out, "1 tool call · 2 connections · 1 alert") {
 		t.Errorf("footer wrong:\n%s", out)
 	}
 }
 
-// TestSummaryNotDeclaredMarker: a connection to a resolved host the call never
-// declared shows ? (not a clean ✓), and drives a ? verdict.
-func TestSummaryNotDeclaredMarker(t *testing.T) {
-	mkReq := func() intent.Event {
-		e := ev(intent.ClientToServer, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"do_thing","arguments":{}}}`)
-		e.TS = at(0)
-		return e
-	}
-	mkResp := func() intent.Event {
-		e := ev(intent.ServerToClient, `{"jsonrpc":"2.0","id":1,"result":{}}`)
-		e.TS = at(2)
-		return e
-	}
+// TestSummaryCapabilityMismatch: a local-only tool (read_file) that egresses is
+// a High capability mismatch from day one, no profile needed.
+func TestSummaryCapabilityMismatch(t *testing.T) {
 	s := &store.Session{
 		Header: store.Header{ID: "t", Command: "srv"},
-		Events: []intent.Event{mkReq(), mkResp()},
+		Events: []intent.Event{
+			reqAt("read_file", `{"path":"/etc/hosts"}`, at(0)),
+			respAt(at(2)),
+		},
+		OSEvents: []capture.Event{connAt(at(1), "8.8.8.8:443")},
+	}
+	var buf bytes.Buffer
+	Summary(&buf, s, false, 0, nil)
+	out := buf.String()
+
+	if !strings.Contains(out, "⚠ 1 alert — capability mismatch") {
+		t.Errorf("missing capability-mismatch verdict:\n%s", out)
+	}
+	if !strings.Contains(out, "⚠ tcp 8.8.8.8:443") || !strings.Contains(out, "local-only tool reached the network") {
+		t.Errorf("capability mismatch not rendered:\n%s", out)
+	}
+}
+
+// TestSummaryClean: a connection to the declared host's resolved IP is no
+// divergence.
+func TestSummaryClean(t *testing.T) {
+	s := &store.Session{
+		Header: store.Header{ID: "t", Command: "srv"},
+		Events: []intent.Event{
+			reqAt("fetch", `{"url":"https://ok.example"}`, at(0)),
+			respAt(at(2)),
+		},
 		OSEvents: []capture.Event{
-			{TS: at(1), Op: capture.OpResolve, PID: 9, Resolve: &capture.Resolve{Host: "telemetry.vendor.net", IPs: []string{"2.2.2.2"}}},
-			{TS: at(1), Op: capture.OpConnect, PID: 9, Proc: "node", Net: &capture.NetFlow{Proto: "tcp", Remote: "2.2.2.2:443", Dir: "out"}},
+			resolveAt(at(1), "ok.example", "9.9.9.9"),
+			connAt(at(1), "9.9.9.9:443"),
 		},
 	}
 	var buf bytes.Buffer
-	Summary(&buf, s, false, 0)
+	Summary(&buf, s, false, 0, nil)
 	out := buf.String()
 
-	if !strings.Contains(out, "? 1 connection to a host no call declared") {
-		t.Errorf("missing ? verdict:\n%s", out)
+	if !strings.Contains(out, "✓ no divergence") {
+		t.Errorf("expected clean verdict:\n%s", out)
 	}
-	if !strings.Contains(out, "? tcp 2.2.2.2:443  telemetry.vendor.net — not declared") {
-		t.Errorf("not-declared connection not marked ?:\n%s", out)
+	if strings.Contains(out, "⚠") {
+		t.Errorf("clean session must not show an alert:\n%s", out)
 	}
-	if strings.Contains(out, "✓") {
-		t.Errorf("a not-declared connection must not show ✓:\n%s", out)
+}
+
+// TestSummaryNovelToReview: once a tool is warm (seen in an earlier session), a
+// connection to a new registrable domain is a Medium "to review".
+func TestSummaryNovelToReview(t *testing.T) {
+	p := triggers.NewProfile()
+	// Prior session establishes `query` as a warm, egressing tool (good.com).
+	prior := &store.Session{
+		Header: store.Header{ID: "20260101-000000.000-1", Command: "srv"},
+		Events: []intent.Event{reqAt("query", `{}`, at(0)), respAt(at(2))},
+		OSEvents: []capture.Event{
+			resolveAt(at(1), "api.good.com", "3.3.3.3"),
+			connAt(at(1), "3.3.3.3:443"),
+		},
 	}
-	if !strings.Contains(out, "1 connection · 1 unverified") {
-		t.Errorf("footer wrong:\n%s", out)
+	p.Learn(prior.Header.ID, triggers.Evaluate(prior, 0, p))
+
+	// Now `query` reaches a never-seen domain → Medium, pushes (warm).
+	cur := &store.Session{
+		Header: store.Header{ID: "20260202-000000.000-1", Command: "srv"},
+		Events: []intent.Event{reqAt("query", `{}`, at(0)), respAt(at(2))},
+		OSEvents: []capture.Event{
+			resolveAt(at(1), "telemetry.vendor.net", "2.2.2.2"),
+			connAt(at(1), "2.2.2.2:443"),
+		},
+	}
+	var buf bytes.Buffer
+	Summary(&buf, cur, false, 0, p)
+	out := buf.String()
+
+	if !strings.Contains(out, "? 1 to review — novel destination") {
+		t.Errorf("missing review verdict:\n%s", out)
+	}
+	if !strings.Contains(out, "? tcp 2.2.2.2:443") || !strings.Contains(out, "first connection to vendor.net for this tool") {
+		t.Errorf("novel destination not rendered:\n%s", out)
+	}
+	if !strings.Contains(out, "1 to review") {
+		t.Errorf("footer missing review count:\n%s", out)
 	}
 }
 
 // TestRoster checks the --all overview: a header count, a verdict marker per
-// session, and flagged sessions expand to show their undeclared connections (so
-// a "(N undeclared)" count is never shown without its list).
+// session, and flagged sessions expand to show their findings (so a count is
+// never shown without its list).
 func TestRoster(t *testing.T) {
 	flagged := &store.Session{
 		Header: store.Header{ID: "s-flagged", Command: "trojan"},
-		OSEvents: []capture.Event{
-			{Op: capture.OpConnect, PID: 1, Proc: "node", Net: &capture.NetFlow{Proto: "tcp", Remote: "1.1.1.1:443", Dir: "out"}},
-		},
+		Events: []intent.Event{reqAt("read_file", `{"path":"/x"}`, at(0)), respAt(at(2))},
+		// a local-only tool egressing → High capability mismatch
+		OSEvents: []capture.Event{connAt(at(1), "8.8.8.8:443")},
 	}
-	cleanReq := ev(intent.ClientToServer, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"fetch","arguments":{"url":"https://ok.example"}}}`)
-	cleanResp := ev(intent.ServerToClient, `{"jsonrpc":"2.0","id":1,"result":{}}`)
 	clean := &store.Session{
 		Header: store.Header{ID: "s-clean", Command: "honest"},
-		Events: []intent.Event{cleanReq, cleanResp},
-		// connection to a declared host's resolved IP → verified ✓
+		Events: []intent.Event{reqAt("fetch", `{"url":"https://ok.example"}`, at(0)), respAt(at(2))},
 		OSEvents: []capture.Event{
-			{Op: capture.OpResolve, PID: 2, Proc: "node", Resolve: &capture.Resolve{Host: "ok.example", IPs: []string{"9.9.9.9"}}},
-			{Op: capture.OpConnect, PID: 2, Proc: "node", Net: &capture.NetFlow{Proto: "tcp", Remote: "9.9.9.9:443", Dir: "out"}},
+			resolveAt(at(1), "ok.example", "9.9.9.9"),
+			connAt(at(1), "9.9.9.9:443"),
 		},
 	}
 
 	var buf bytes.Buffer
-	Roster(&buf, []*store.Session{flagged, clean}, false, 0)
+	Roster(&buf, []*store.Session{flagged, clean}, false, 0, nil)
 	out := buf.String()
 
-	if !strings.Contains(out, "? 1 of 2 sessions with unverified connections") {
+	if !strings.Contains(out, "1 of 2 sessions with findings to review") {
 		t.Errorf("missing header count:\n%s", out)
 	}
-	// The unverified session must expand its connection (never a bare count).
-	if !strings.Contains(out, "1.1.1.1:443  no DNS lookup") {
-		t.Errorf("unverified session did not list its connection:\n%s", out)
+	// The flagged session must expand its finding (never a bare count).
+	if !strings.Contains(out, "8.8.8.8:443") || !strings.Contains(out, "local-only tool reached the network") {
+		t.Errorf("flagged session did not list its finding:\n%s", out)
 	}
 	if !strings.Contains(out, "s-clean") {
 		t.Errorf("clean session missing:\n%s", out)
@@ -138,28 +203,21 @@ func TestTimelineInterleavesOSEvents(t *testing.T) {
 	s := &store.Session{
 		Header: store.Header{ID: "test", Command: "srv"},
 		Events: []intent.Event{
-			func() intent.Event {
-				e := ev(intent.ClientToServer, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"fetch"}}`)
-				e.TS = at(1)
-				return e
-			}(),
-			func() intent.Event {
-				e := ev(intent.ServerToClient, `{"jsonrpc":"2.0","id":1,"result":{}}`)
-				e.TS = at(3)
-				return e
-			}(),
+			reqAt("fetch", `{}`, at(1)),
+			respAt(at(3)),
 		},
 		OSEvents: []capture.Event{
-			{TS: at(2), Op: capture.OpConnect, PID: 4242, Proc: "curl",
-				Net: &capture.NetFlow{Proto: "tcp", Remote: "93.184.216.34:443", Dir: "out"}},
+			connAt(at(2), "93.184.216.34:443"),
 		},
 	}
+	// The lone connection has its own pid/proc for the attribution assertion.
+	s.OSEvents[0].PID = 4242
+	s.OSEvents[0].Proc = "curl"
 
 	var buf bytes.Buffer
-	Timeline(&buf, s, false, 0)
+	Timeline(&buf, s, false, 0, nil)
 	out := buf.String()
 
-	// The OS connect line must appear, with the remote destination and process.
 	if !strings.Contains(out, "net") || !strings.Contains(out, "tcp 93.184.216.34:443") {
 		t.Errorf("OS connect not rendered with destination:\n%s", out)
 	}
@@ -170,9 +228,6 @@ func TestTimelineInterleavesOSEvents(t *testing.T) {
 		t.Errorf("summary missing OS event count:\n%s", out)
 	}
 
-	// Ordering: the connect (t=2) must fall between the request (t=1) and the
-	// response fold (t=3) — i.e. after "fetch", before the request's line ends?
-	// Simpler: the net line index is after the tools/call line index.
 	callIdx := strings.Index(out, "tools/call")
 	netIdx := strings.Index(out, "· net")
 	if callIdx < 0 || netIdx < 0 || netIdx < callIdx {

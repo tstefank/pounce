@@ -15,7 +15,7 @@ import (
 )
 
 // version is the pounce build version, recorded in session metadata.
-const version = "0.3.1"
+const version = "0.4.0"
 
 func main() {
 	root := &cobra.Command{

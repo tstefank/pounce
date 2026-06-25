@@ -7,12 +7,15 @@ surfaces every JSON-RPC message that flows through it. It's **observe-only**: it
 watches and records, and never blocks, modifies, or injects into the stream —
 the wrapped server behaves exactly as if pounce weren't there.
 
-> **v0.3.1 — the MVP (Phases 1–3), zero Full Disk Access:** tool-call timeline
-> (no privileges), per-process network capture (opt-in `sudo pounce daemon`,
-> root only), and intent↔effect correlation. `pounce view` shows a verdict-first
-> summary — each tool call with the connections it caused (`✓` confirmed / `?`
-> unverified) — and `--all` rolls several parallel servers into one overview.
-> File/exec capture (`eslogger`) is Phase 4 — see [Roadmap](#roadmap).
+> **The MVP (Phases 1–3), zero Full Disk Access:** tool-call timeline (no
+> privileges), per-process network capture (opt-in `sudo pounce daemon`, root
+> only), and intent↔effect correlation with **trigger rules**. `pounce view`
+> shows a verdict-first summary — each tool call with the connections it caused,
+> labeled `⚠` alert (a local-only tool egressed, or a call connected somewhere it
+> didn't declare) / `?` to review (a novel or unnamed destination) / `✓` expected
+> — and `--all` rolls several parallel servers into one overview. The alert rules
+> are specified in [TRIGGERS.md](TRIGGERS.md). File/exec capture (`eslogger`) is
+> Phase 4 — see [Roadmap](#roadmap).
 
 ## Install
 
@@ -106,8 +109,8 @@ records the `tcpdump`/OS versions for provenance.
 phases against [`examples/trojan-fetch-server.mjs`](examples/trojan-fetch-server.mjs)
 — an MCP server whose `fetch` tool honestly fetches the URL but *also* quietly
 connects to a hardcoded IP. pounce records the tool call, captures both
-connections, ties the legit one back to the declared URL via DNS, and flags the
-hardcoded one as an undeclared destination.
+connections, ties the legit one back to the declared URL via DNS (`✓ expected`),
+and fires a `⚠ destination mismatch` alert on the hardcoded one.
 
 ## How it works
 
@@ -119,11 +122,13 @@ Three deliberately decoupled parts:
 - **OS-capture core (Phase 2+):** the *actual* effect — network via the system
   `tcpdump` on `pktap` (Phase 2), files/exec via `eslogger` (Phase 4) —
   attributed by PID subtree.
-- **Correlator (Phase 3):** joins intent ↔ effect by PID + time, and flags when
-  actual behavior diverges — including a connection to an IP that no DNS lookup
-  produced (a hardcoded/exfil destination), caught even inside a benign call's
-  window. See [docs/correlation.md](docs/correlation.md) for the mechanics and
-  caveats.
+- **Correlator + triggers (Phase 3):** joins intent ↔ effect by PID + time, names
+  each destination from the server's own DNS, then applies the
+  [TRIGGERS.md](TRIGGERS.md) rules — capability mismatch (a local-only tool
+  egressed), destination mismatch (went somewhere it didn't declare, e.g. a
+  hardcoded/exfil IP caught inside a benign call's window), novel destination, and
+  more — each a finding with a severity and confidence. See
+  [docs/correlation.md](docs/correlation.md) for the mechanics and caveats.
 
 ## Roadmap
 

@@ -9,10 +9,10 @@ import (
 	"time"
 
 	"pounce/internal/capture"
-	"pounce/internal/correlate"
 	"pounce/internal/intent"
 	"pounce/internal/protocol"
 	"pounce/internal/store"
+	"pounce/internal/triggers"
 )
 
 // argSummaryMax caps how much of a tool call's arguments is shown inline.
@@ -33,8 +33,8 @@ func (s styler) dim(t string) string    { return s.paint("90", t) }   // gray
 func (s styler) method(t string) string { return s.paint("1;34", t) } // bold blue
 func (s styler) tool(t string) string   { return s.paint("1;33", t) } // bold yellow
 func (s styler) ok(t string) string     { return s.paint("32", t) }   // green
-func (s styler) warn(t string) string   { return s.paint("33", t) }   // yellow: unverified
-func (s styler) errc(t string) string   { return s.paint("1;31", t) } // bold red
+func (s styler) warn(t string) string   { return s.paint("33", t) }   // yellow: review
+func (s styler) errc(t string) string   { return s.paint("1;31", t) } // bold red: alert
 func (s styler) remote(t string) string { return s.paint("1;36", t) } // bold cyan: network destination
 
 func (s styler) arrow(d intent.Direction) string {
@@ -48,11 +48,11 @@ func (s styler) arrow(d intent.Direction) string {
 	}
 }
 
-// Summary writes a verdict-first, grouped view: a one-line verdict, then each
-// tool call with the connections it caused (✓ explained / ⚠ undeclared), then a
-// compact footer. It answers "what happened, and is anything wrong" at a glance;
-// `--timeline` (Timeline) gives the full chronological protocol + OS log.
-func Summary(w io.Writer, s *store.Session, color bool, window time.Duration) {
+// Summary writes a verdict-first, grouped view: a one-line verdict driven by the
+// trigger rules (TRIGGERS.md), then each tool call with the connections it
+// caused — each labeled by severity (⚠ alert / ? review / ✓ expected) — then a
+// compact footer. `--timeline` (Timeline) gives the full chronological log.
+func Summary(w io.Writer, s *store.Session, color bool, window time.Duration, profile *triggers.Profile) {
 	st := styler{on: color}
 	h := s.Header
 	cmd := h.Command
@@ -61,68 +61,54 @@ func Summary(w io.Writer, s *store.Session, color bool, window time.Duration) {
 	}
 	fmt.Fprintf(w, "%s  %s\n", cmd, st.dim(h.ID))
 
-	r := correlate.Correlate(s, window)
-	und := r.UndeclaredDestinations()
-	notDecl := r.NotDeclared()
-
-	switch {
-	case len(s.OSEvents) == 0:
-		fmt.Fprintln(w, st.dim("· no OS capture (run `sudo pounce daemon` to see the connections each call caused)"))
-	case len(und) > 0:
-		fmt.Fprintln(w, st.warn(fmt.Sprintf("? %d connection%s to an IP with no DNS lookup", len(und), plural(len(und)))))
-	case len(notDecl) > 0:
-		fmt.Fprintln(w, st.warn(fmt.Sprintf("? %d connection%s to a host no call declared", len(notDecl), plural(len(notDecl)))))
-	case len(r.OutOfBand) > 0:
-		fmt.Fprintln(w, st.dim(fmt.Sprintf("○ %d out-of-band connection%s (no active tool call)", len(r.OutOfBand), plural(len(r.OutOfBand)))))
-	default:
-		fmt.Fprintln(w, st.ok("✓ no divergence"))
-	}
+	rep := triggers.Evaluate(s, window, profile)
+	fmt.Fprintln(w, verdictLine(st, rep))
 	fmt.Fprintln(w)
 
 	calls, conns := 0, 0
-	for _, l := range r.Links {
-		// Skip protocol boilerplate (initialize/tools/list) that caused nothing.
-		if l.Tool == "" && len(l.Connections) == 0 {
-			continue
-		}
-		label := st.method(l.Method)
-		if l.Tool != "" {
+	for _, cf := range rep.Calls {
+		label := st.method(cf.Method)
+		if cf.Tool != "" {
 			calls++
-			label = st.method(l.Method) + " " + st.tool(l.Tool)
+			label = st.method(cf.Method) + " " + st.tool(cf.Tool)
 		}
 		args := ""
-		if l.Args != "" {
-			args = "  " + st.dim(oneLine(l.Args, 60))
+		if cf.Args != "" {
+			args = "  " + st.dim(oneLine(cf.Args, 60))
 		}
-		if len(l.Connections) == 0 {
+		if len(cf.Findings) == 0 {
 			fmt.Fprintf(w, "  %s%s  %s\n", label, args, st.dim("(no network)"))
 			continue
 		}
 		fmt.Fprintf(w, "  %s%s\n", label, args)
-		for _, c := range l.Connections {
-			conns++
-			fmt.Fprintf(w, "     %s\n", summaryConn(st, c))
+		for _, f := range cf.Findings {
+			conns += f.Count
+			fmt.Fprintf(w, "     %s\n", findingLine(st, f))
 		}
 	}
-	if len(r.OutOfBand) > 0 {
+	if len(rep.OutOfBand) > 0 {
 		fmt.Fprintf(w, "  %s\n", st.dim("out-of-band — no active tool call:"))
-		for _, c := range r.OutOfBand {
-			conns++
-			fmt.Fprintf(w, "     %s\n", summaryConn(st, c))
+		for _, f := range rep.OutOfBand {
+			conns += f.Count
+			fmt.Fprintf(w, "     %s\n", findingLine(st, f))
 		}
 	}
 
+	high, review := rep.Counts()
 	footer := fmt.Sprintf("%d tool call%s · %d connection%s", calls, plural(calls), conns, plural(conns))
-	if unv := len(und) + len(notDecl); unv > 0 {
-		footer += fmt.Sprintf(" · %d unverified", unv)
+	if high > 0 {
+		footer += fmt.Sprintf(" · %d alert%s", high, plural(high))
+	}
+	if review > 0 {
+		footer += fmt.Sprintf(" · %d to review", review)
 	}
 	fmt.Fprintf(w, "\n%s\n", st.dim(footer+"    (--timeline for the full log)"))
 }
 
 // Roster renders a one-line verdict per session (newest first) — the overview
-// for several wrapped servers running at once. Flagged sessions expand to show
-// their undeclared connections.
-func Roster(w io.Writer, sessions []*store.Session, color bool, window time.Duration) {
+// for several wrapped servers running at once. Sessions with findings expand to
+// show them (never a bare count without its list).
+func Roster(w io.Writer, sessions []*store.Session, color bool, window time.Duration, profile *triggers.Profile) {
 	st := styler{on: color}
 	if len(sessions) == 0 {
 		fmt.Fprintln(w, st.dim("no sessions in ~/.pounce/sessions"))
@@ -130,24 +116,27 @@ func Roster(w io.Writer, sessions []*store.Session, color bool, window time.Dura
 	}
 
 	type row struct {
-		s   *store.Session
-		unv []correlate.Conn // unverified connections (no-DNS + not-declared)
+		s       *store.Session
+		notable []triggers.Finding
+		mark    string
+		high    int
+		review  int
 	}
 	var rows []row
-	unverified := 0
+	flagged := 0
 	for _, s := range sessions {
-		r := correlate.Correlate(s, window)
-		unv := append(r.UndeclaredDestinations(), r.NotDeclared()...)
-		if len(unv) > 0 {
-			unverified++
+		rep := triggers.Evaluate(s, window, profile)
+		high, review := rep.Counts()
+		if high > 0 || review > 0 {
+			flagged++
 		}
-		rows = append(rows, row{s, unv})
+		rows = append(rows, row{s: s, notable: notableFindings(rep), mark: sessionMark(st, rep), high: high, review: review})
 	}
 
-	if unverified > 0 {
-		fmt.Fprintf(w, "%s\n\n", st.warn(fmt.Sprintf("? %d of %d session%s with unverified connections", unverified, len(rows), plural(len(rows)))))
+	if flagged > 0 {
+		fmt.Fprintf(w, "%s\n\n", st.warn(fmt.Sprintf("%d of %d session%s with findings to review", flagged, len(rows), plural(len(rows)))))
 	} else {
-		fmt.Fprintf(w, "%s\n\n", st.ok(fmt.Sprintf("✓ %d session%s, all connections verified", len(rows), plural(len(rows)))))
+		fmt.Fprintf(w, "%s\n\n", st.ok(fmt.Sprintf("✓ %d session%s, no divergence", len(rows), plural(len(rows)))))
 	}
 
 	for _, rw := range rows {
@@ -155,63 +144,151 @@ func Roster(w io.Writer, sessions []*store.Session, color bool, window time.Dura
 		if len(rw.s.Header.Args) > 0 {
 			cmd += " " + strings.Join(rw.s.Header.Args, " ")
 		}
-		mark := sessionVerdict(st, rw.s, len(rw.unv))
 		count := ""
-		if len(rw.unv) > 0 {
-			count = "  " + st.warn(fmt.Sprintf("(%d unverified)", len(rw.unv)))
+		if label := findingsCountLabel(st, rw.high, rw.review); label != "" {
+			count = "  " + label
 		}
-		fmt.Fprintf(w, "%s %s  %s%s\n", mark, oneLine(cmd, 56), st.dim(rw.s.Header.ID), count)
+		fmt.Fprintf(w, "%s %s  %s%s\n", rw.mark, oneLine(cmd, 56), st.dim(rw.s.Header.ID), count)
 		const showMax = 3
-		for i, c := range rw.unv {
+		for i, f := range rw.notable {
 			if i == showMax {
-				fmt.Fprintf(w, "     %s\n", st.dim(fmt.Sprintf("… and %d more", len(rw.unv)-showMax)))
+				fmt.Fprintf(w, "     %s\n", st.dim(fmt.Sprintf("… and %d more", len(rw.notable)-showMax)))
 				break
 			}
-			fmt.Fprintf(w, "     %s\n", summaryConn(st, c))
+			fmt.Fprintf(w, "     %s\n", findingLine(st, f))
 		}
 	}
-	fmt.Fprintf(w, "\n%s\n", st.dim(fmt.Sprintf("%d session%s · %d unverified    (pounce view --session <id> for one)", len(rows), plural(len(rows)), unverified)))
+	fmt.Fprintf(w, "\n%s\n", st.dim(fmt.Sprintf("%d session%s · %d to review    (pounce view --session <id> for one)", len(rows), plural(len(rows)), flagged)))
 }
 
-// sessionVerdict returns the marker glyph for a session's status.
-func sessionVerdict(st styler, s *store.Session, unverified int) string {
+// verdictLine is the one-line summary at the top: the highest-severity signal
+// present, named by the rules that fired.
+func verdictLine(st styler, rep triggers.Report) string {
+	if !rep.HasCapture {
+		return st.dim("· no OS capture (run `sudo pounce daemon` to see the connections each call caused)")
+	}
+	high, review := rep.Counts()
 	switch {
-	case unverified > 0:
+	case high > 0:
+		return st.errc(fmt.Sprintf("⚠ %d alert%s — %s", high, plural(high), typesPhrase(rep, triggers.High)))
+	case review > 0:
+		return st.warn(fmt.Sprintf("? %d to review — %s", review, typesPhrase(rep, triggers.Medium)))
+	default:
+		return st.ok("✓ no divergence")
+	}
+}
+
+// typesPhrase lists the distinct finding types at a severity (pushing ones, for
+// Medium), e.g. "capability mismatch, destination mismatch".
+func typesPhrase(rep triggers.Report, sev triggers.Severity) string {
+	seen := map[triggers.Type]bool{}
+	var order []string
+	for _, f := range rep.All() {
+		include := f.Severity == sev
+		if sev == triggers.Medium {
+			include = include && f.Pushes()
+		}
+		if include && !seen[f.Type] {
+			seen[f.Type] = true
+			order = append(order, string(f.Type))
+		}
+	}
+	return strings.Join(order, ", ")
+}
+
+// notableFindings returns the findings worth surfacing in the roster: alerts and
+// pushing (warm, confident) review findings.
+func notableFindings(rep triggers.Report) []triggers.Finding {
+	var out []triggers.Finding
+	for _, f := range rep.All() {
+		if f.Severity == triggers.High || (f.Severity == triggers.Medium && f.Pushes()) {
+			out = append(out, f)
+		}
+	}
+	return out
+}
+
+// sessionMark returns the marker glyph for a session's overall status.
+func sessionMark(st styler, rep triggers.Report) string {
+	high, review := rep.Counts()
+	switch {
+	case high > 0:
+		return st.errc("⚠")
+	case review > 0:
 		return st.warn("?")
-	case len(s.OSEvents) == 0:
+	case !rep.HasCapture:
 		return st.dim("·")
 	default:
 		return st.ok("✓")
 	}
 }
 
-// summaryConn renders one connection for the grouped view. The marker reflects
-// confidence: ✓ matches a declared host (went where the call said), ? we
-// couldn't confirm it — either the resolved host wasn't declared, or no DNS
-// lookup was seen at all (which, given DNS caching, we can't call malicious).
-func summaryConn(st styler, c correlate.Conn) string {
-	proto := ""
-	if c.Event.Net != nil {
-		proto = c.Event.Net.Proto
+// findingsCountLabel summarizes a session's findings as "(N alerts, M to review)".
+func findingsCountLabel(st styler, high, review int) string {
+	var parts []string
+	if high > 0 {
+		parts = append(parts, st.errc(fmt.Sprintf("%d alert%s", high, plural(high))))
 	}
-	dest := proto + " " + c.Remote()
-	mark, reason := connMark(st, c)
-	if c.Declared {
-		return fmt.Sprintf("%s %s  %s", mark, st.ok(dest), st.dim(reason))
+	if review > 0 {
+		parts = append(parts, st.warn(fmt.Sprintf("%d to review", review)))
 	}
-	return fmt.Sprintf("%s %s  %s", mark, st.warn(dest), st.dim(reason))
+	if len(parts) == 0 {
+		return ""
+	}
+	return "(" + strings.Join(parts, ", ") + ")"
 }
 
-// connMark returns the confidence marker and reason for a connection.
-func connMark(st styler, c correlate.Conn) (mark, reason string) {
-	switch {
-	case !c.Resolved:
-		return st.warn("?"), "no DNS lookup — unverified destination"
-	case c.Declared:
-		return st.ok("✓"), c.Host
+// findingMark returns the severity glyph for a finding. A Medium that does not
+// push (provisional during learning, or low-confidence) is dimmed — it's in the
+// log but not an active concern.
+func findingMark(st styler, f triggers.Finding) string {
+	switch f.Severity {
+	case triggers.High:
+		return st.errc("⚠")
+	case triggers.Medium:
+		if f.Pushes() {
+			return st.warn("?")
+		}
+		return st.dim("?")
 	default:
-		return st.warn("?"), c.Host + " — not declared"
+		return st.ok("✓")
 	}
+}
+
+// findingLine renders one connection-finding: severity mark, destination, reason.
+func findingLine(st styler, f triggers.Finding) string {
+	proto := ""
+	if f.Conn.Event.Net != nil {
+		proto = f.Conn.Event.Net.Proto
+	}
+	dest := proto + " " + f.Conn.Remote()
+	switch f.Severity {
+	case triggers.High:
+		dest = st.errc(dest)
+	case triggers.Medium:
+		dest = st.warn(dest)
+	default:
+		dest = st.ok(dest)
+	}
+	detail := f.Detail
+	// Annotations only explain why a Medium stays soft; a High alert shows clean.
+	if f.Provisional {
+		detail += " (learning)"
+	} else if f.Severity == triggers.Medium && f.Confidence < 0.5 {
+		detail += " (low confidence)"
+	}
+	line := fmt.Sprintf("%s %s  %s", findingMark(st, f), dest, st.dim(detail))
+	if f.Count > 1 {
+		line += st.dim(fmt.Sprintf("  (×%d)", f.Count))
+	}
+	return line
+}
+
+// findingLineWithProc is findingLine plus the attributed process, for the
+// timeline's correlation section.
+func findingLineWithProc(st styler, f triggers.Finding) string {
+	who := st.dim(fmt.Sprintf("%s pid %d", f.Conn.Event.Proc, f.Conn.Event.PID))
+	return findingLine(st, f) + "  " + who
 }
 
 func plural(n int) string {
@@ -224,7 +301,7 @@ func plural(n int) string {
 // Timeline writes a tool-call timeline for the session to w. When color is true
 // the output is decorated with ANSI escape codes. window is the correlation
 // window (<=0 uses correlate.DefaultWindow).
-func Timeline(w io.Writer, s *store.Session, color bool, window time.Duration) {
+func Timeline(w io.Writer, s *store.Session, color bool, window time.Duration, profile *triggers.Profile) {
 	st := styler{on: color}
 
 	h := s.Header
@@ -384,69 +461,44 @@ func Timeline(w io.Writer, s *store.Session, color bool, window time.Duration) {
 	}
 	fmt.Fprintln(w, summary)
 
-	renderCorrelation(w, st, s, window)
+	renderCorrelation(w, st, s, window, profile)
 }
 
-// renderCorrelation shows the intent↔effect join: which tool call caused which
-// connections, and — the divergence signal — connections that no active call
-// explains. Shown only when OS events were captured.
-func renderCorrelation(w io.Writer, st styler, s *store.Session, window time.Duration) {
+// renderCorrelation shows the intent↔effect join evaluated against the trigger
+// rules: the verdict, which tool call caused which connections (each with its
+// finding), and any out-of-band connections. Shown only when OS events exist.
+func renderCorrelation(w io.Writer, st styler, s *store.Session, window time.Duration, profile *triggers.Profile) {
 	if len(s.OSEvents) == 0 {
 		return
 	}
-	r := correlate.Correlate(s, window)
-	fmt.Fprintf(w, "\ncorrelation %s:\n", st.dim(fmt.Sprintf("(window %s)", r.Window)))
+	rep := triggers.Evaluate(s, window, profile)
+	fmt.Fprintf(w, "\ncorrelation %s:\n", st.dim(fmt.Sprintf("(window %s)", rep.Window)))
+	fmt.Fprintf(w, "  %s\n", verdictLine(st, rep))
 
 	attributed := false
-	for _, l := range r.Links {
-		if len(l.Connections) == 0 {
+	for _, cf := range rep.Calls {
+		if len(cf.Findings) == 0 {
 			continue
 		}
 		attributed = true
-		label := st.method(l.Method)
-		if l.Tool != "" {
-			label += " " + st.tool(l.Tool)
+		label := st.method(cf.Method)
+		if cf.Tool != "" {
+			label += " " + st.tool(cf.Tool)
 		}
-		fmt.Fprintf(w, "  %s %s\n", label, st.dim(fmt.Sprintf("→ caused %d", len(l.Connections))))
-		for _, c := range l.Connections {
-			fmt.Fprintf(w, "      %s\n", connLine(st, c))
+		fmt.Fprintf(w, "  %s %s\n", label, st.dim(fmt.Sprintf("→ caused %d", len(cf.Findings))))
+		for _, f := range cf.Findings {
+			fmt.Fprintf(w, "      %s\n", findingLineWithProc(st, f))
 		}
 	}
-	if !attributed {
+	if !attributed && len(rep.OutOfBand) == 0 {
 		fmt.Fprintf(w, "  %s\n", st.dim("(no connections attributed to a tool call)"))
 	}
-	if len(r.OutOfBand) > 0 {
-		fmt.Fprintf(w, "  %s\n", st.dim(fmt.Sprintf("○ %d out-of-band — no active tool call:", len(r.OutOfBand))))
-		for _, c := range r.OutOfBand {
-			fmt.Fprintf(w, "      %s\n", connLine(st, c))
+	if len(rep.OutOfBand) > 0 {
+		fmt.Fprintf(w, "  %s\n", st.dim(fmt.Sprintf("○ %d out-of-band — no active tool call:", len(rep.OutOfBand))))
+		for _, f := range rep.OutOfBand {
+			fmt.Fprintf(w, "      %s\n", findingLineWithProc(st, f))
 		}
 	}
-	// The sharpest signal: an IP no DNS lookup produced — unverified (could be a
-	// hardcoded destination, or just a cached lookup we didn't observe).
-	if und := r.UndeclaredDestinations(); len(und) > 0 {
-		fmt.Fprintf(w, "  %s\n", st.warn(fmt.Sprintf("? %d destination(s) with no DNS lookup (IP not resolved from any host):", len(und))))
-		for _, c := range und {
-			fmt.Fprintf(w, "      %s\n", connLine(st, c))
-		}
-	}
-}
-
-// connLine formats one analyzed connection: destination, the host it resolved
-// from (or an unresolved flag), and the process.
-func connLine(st styler, c correlate.Conn) string {
-	proto := ""
-	if c.Event.Net != nil {
-		proto = c.Event.Net.Proto
-	}
-	remote := c.Remote()
-	mark, reason := connMark(st, c)
-	if c.Declared {
-		remote = st.ok(remote)
-	} else {
-		remote = st.warn(remote)
-	}
-	who := st.dim(fmt.Sprintf("%s pid %d", c.Event.Proc, c.Event.PID))
-	return fmt.Sprintf("%s %s %s  %s  %s", mark, proto, remote, st.dim("("+reason+")"), who)
 }
 
 // errorsLabel colors the error count red when nonzero.

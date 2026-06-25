@@ -40,7 +40,17 @@ type Conn struct {
 	Event    capture.Event
 	Host     string // host the destination IP was resolved from ("" if none)
 	Resolved bool   // the IP appeared in a DNS answer in this session
-	Declared bool   // Host was named in a tool call's arguments
+	Declared bool   // Host was named in some tool call's arguments (session-wide)
+
+	// ByDeclaredHost is set when the connection was attributed to its owning
+	// call because that call's arguments named this destination's host — the
+	// strongest attribution (we go by *where the call said it would go*, not
+	// merely by timing). Feeds confidence in the triggers layer.
+	ByDeclaredHost bool
+	// Ambiguous is set when more than one call's execution window was open at
+	// connection time and host-matching did not single one out — so the
+	// attribution is timing-only and uncertain (lowers confidence).
+	Ambiguous bool
 }
 
 // Remote returns the connection's remote endpoint.
@@ -53,11 +63,12 @@ func (c Conn) Remote() string {
 
 // Link ties one request to the connections that occurred during its execution.
 type Link struct {
-	CallTS      time.Time
-	Method      string // JSON-RPC method, e.g. "tools/call"
-	Tool        string // tool name, for tools/call
-	Args        string // raw tool arguments, for tools/call
-	Connections []Conn
+	CallTS        time.Time
+	Method        string   // JSON-RPC method, e.g. "tools/call"
+	Tool          string   // tool name, for tools/call
+	Args          string   // raw tool arguments, for tools/call
+	DeclaredHosts []string // hosts named in this call's arguments (lowercased)
+	Connections   []Conn
 }
 
 // Result is the correlation of a whole session.
@@ -162,6 +173,9 @@ func Correlate(s *store.Session, w time.Duration) Result {
 			link.Args = string(tc.Arguments)
 			for _, h := range hostsIn(link.Args) {
 				declared[h] = true
+				if !hosts[h] {
+					link.DeclaredHosts = append(link.DeclaredHosts, h)
+				}
 				hosts[h] = true
 			}
 		}
@@ -179,11 +193,12 @@ func Correlate(s *store.Session, w time.Duration) Result {
 		// whose arguments declared this destination's host — so concurrent calls
 		// attribute by *where they said they'd go*, not merely by timing. Fall
 		// back to the most recently started active call.
-		best, byHost := -1, -1
+		best, byHost, active := -1, -1, 0
 		for i := range wins {
 			if oe.TS.Before(wins[i].start) || oe.TS.After(wins[i].end) {
 				continue
 			}
+			active++
 			if best < 0 || wins[i].start.After(wins[best].start) {
 				best = i
 			}
@@ -195,6 +210,11 @@ func Correlate(s *store.Session, w time.Duration) Result {
 		}
 		if byHost >= 0 {
 			best = byHost
+			c.ByDeclaredHost = true
+		} else if active > 1 {
+			// Several calls were open and none named this host: timing-only,
+			// uncertain attribution.
+			c.Ambiguous = true
 		}
 		if best < 0 {
 			res.OutOfBand = append(res.OutOfBand, c)

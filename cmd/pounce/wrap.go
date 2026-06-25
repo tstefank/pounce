@@ -17,6 +17,7 @@ import (
 	"pounce/internal/intent"
 	"pounce/internal/ipc"
 	"pounce/internal/store"
+	"pounce/internal/triggers"
 )
 
 // eventBuffer is how many observed messages can queue for the disk writer
@@ -72,8 +73,9 @@ func runWrap(args []string) error {
 	// capture daemon (if one is running) and stream OS events back into the log.
 	// No daemon → this is a no-op and wrap behaves exactly as in Phase 1.
 	var daemonConn *net.UnixConn
+	var daemonReader sync.WaitGroup
 	src.OnStart = func(pid int) {
-		daemonConn = connectDaemon(sessionID, pid, w)
+		daemonConn = connectDaemon(sessionID, pid, w, &daemonReader)
 	}
 
 	// Drain observed events to disk on a separate goroutine so disk latency
@@ -98,9 +100,12 @@ func runWrap(args []string) error {
 	consumer.Wait()
 
 	// Stop the OS-event stream before closing the log: closing the connection
-	// unblocks the reader goroutine that writes OS events into the store.
+	// unblocks the reader goroutine, and we wait for it to finish draining any
+	// already-received OS events — so none are written after the log is closed,
+	// and learnSession reads a complete file.
 	if daemonConn != nil {
 		daemonConn.Close()
+		daemonReader.Wait()
 	}
 
 	if err := w.Close(); err != nil {
@@ -110,7 +115,37 @@ func runWrap(args []string) error {
 		fmt.Fprintf(os.Stderr, "pounce: dropped %d log events under load (forwarding was unaffected)\n", d)
 	}
 
+	// If capture was active, fold this completed session into the learned
+	// per-(server, tool) baseline so later sessions can flag novel destinations
+	// and tools that newly start egressing. Only when the daemon was attached:
+	// without ground truth, "never egressed" would just mean "wasn't watching".
+	if daemonConn != nil {
+		learnSession(sessionID, w.Path())
+	}
+
 	return runErr
+}
+
+// learnSession folds a just-finished session's network behavior into the
+// persisted per-(server, tool) profile. Best-effort: a failure here never
+// affects the wrap's exit. (Concurrent wraps closing at once can race on the
+// profile file — last write wins; a dropped update self-heals, since the missing
+// destination is simply re-flagged as novel on its next visit.)
+func learnSession(sessionID, path string) {
+	s, err := store.Read(path)
+	if err != nil {
+		return
+	}
+	profile, err := triggers.LoadProfile()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "pounce: load learned baseline: %v\n", err)
+	}
+	rep := triggers.Evaluate(s, 0, profile)
+	if profile.Learn(sessionID, rep) {
+		if err := profile.Save(); err != nil {
+			fmt.Fprintf(os.Stderr, "pounce: update learned baseline: %v\n", err)
+		}
+	}
 }
 
 // connectDaemon makes a best-effort connection to the capture daemon, registers
@@ -119,7 +154,7 @@ func runWrap(args []string) error {
 // client-launched shim with no daemon behaves exactly as in Phase 1.
 //
 // The socket path can be overridden with POUNCE_SOCK (for testing).
-func connectDaemon(sessionID string, pid int, w *store.Writer) *net.UnixConn {
+func connectDaemon(sessionID string, pid int, w *store.Writer, rdr *sync.WaitGroup) *net.UnixConn {
 	sock := os.Getenv("POUNCE_SOCK")
 	if sock == "" {
 		sock = ipc.DefaultSocket
@@ -135,7 +170,9 @@ func connectDaemon(sessionID string, pid int, w *store.Writer) *net.UnixConn {
 	}
 	fmt.Fprintf(os.Stderr, "pounce: capture daemon attached — recording OS activity for the server subtree\n")
 
+	rdr.Add(1)
 	go func() {
+		defer rdr.Done()
 		dec := json.NewDecoder(conn)
 		for {
 			var m ipc.Message

@@ -9,6 +9,7 @@ import (
 
 	"pounce/internal/correlate"
 	"pounce/internal/store"
+	"pounce/internal/triggers"
 	"pounce/internal/view"
 )
 
@@ -26,8 +27,10 @@ func newViewCmd() *cobra.Command {
 		Use:   "view",
 		Short: "Show what a wrapped session did: tool calls, the connections they caused, and divergence",
 		Long: `view reads a recorded session log and, by default, prints a verdict-first
-summary: each tool call with the connections it caused (✓ explained / ⚠
-undeclared destination), led by a one-line verdict.
+summary: each tool call with the connections it caused, labeled by the network
+trigger rules — ⚠ alert (e.g. a local-only tool egressed, or a call connected
+somewhere it didn't declare), ? to review (a novel or unnamed destination), ✓
+expected — led by a one-line verdict.
 
 With no --session, the most recent session is shown. --timeline prints the full
 chronological protocol + OS log instead. --window tunes how long after a call a
@@ -53,12 +56,26 @@ func runView(session, colorWhen string, window time.Duration, timeline, all bool
 		return err
 	}
 
+	// The learned per-(server, tool) baseline feeds the novelty / learned-egress
+	// triggers. view is read-only: a missing or corrupt profile degrades to the
+	// day-one rules (an empty, usable profile) rather than failing.
+	profile, err := triggers.LoadProfile()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "pounce: %v (continuing without the learned baseline)\n", err)
+	}
+	if profile == nil {
+		// LoadProfile only returns nil when the home dir can't be located; use an
+		// empty profile so the day-one rules (incl. soft novelty) still apply
+		// rather than silently disabling them.
+		profile = triggers.NewProfile()
+	}
+
 	if all {
 		sessions, err := store.RecentSessions(limit)
 		if err != nil {
 			return fmt.Errorf("list sessions: %w", err)
 		}
-		view.Roster(os.Stdout, sessions, color, window)
+		view.Roster(os.Stdout, sessions, color, window, profile)
 		return nil
 	}
 
@@ -71,9 +88,9 @@ func runView(session, colorWhen string, window time.Duration, timeline, all bool
 		return fmt.Errorf("read session %s: %w", path, err)
 	}
 	if timeline {
-		view.Timeline(os.Stdout, s, color, window)
+		view.Timeline(os.Stdout, s, color, window, profile)
 	} else {
-		view.Summary(os.Stdout, s, color, window)
+		view.Summary(os.Stdout, s, color, window, profile)
 	}
 	return nil
 }
